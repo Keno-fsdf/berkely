@@ -7,23 +7,30 @@ import java.util.Random;
 
 public class UDPTransport {
 
+    // Flag: steuert, ob verlorene Nachrichten in der Konsole gedruckt werden
+    private static volatile boolean PRINT_LOSS = false;
+
+    public static void setPrintLoss(boolean enabled) {
+        PRINT_LOSS = enabled;
+    }
+
     private DatagramSocket socket;
     private final double successProbability;
     private final Random random = new Random();
     private volatile boolean closed = false;
 
-    public UDPTransport(int port, double successProbability) throws SocketException {
+    private final SimulationMonitor monitor;
+
+    public UDPTransport(int port, double successProbability, SimulationMonitor monitor) throws SocketException {
         this.successProbability = successProbability;
         this.socket = new DatagramSocket(port);
-        this.socket.setSoTimeout(200); // 200ms Timeout: receive() kehrt regelmäßig zurück
+        this.socket.setSoTimeout(200);
+        this.monitor = monitor;
     }
 
-    // Beendet den Socket (entblockt receive())
     public void close() {
         closed = true;
-        if (socket != null && !socket.isClosed()) {
-            socket.close();
-        }
+        if (socket != null && !socket.isClosed()) socket.close();
     }
 
     public void send(Message msg, NodeInfo target) {
@@ -35,12 +42,20 @@ public class UDPTransport {
             oos.flush();
             byte[] data = bos.toByteArray();
 
+            if (monitor != null) monitor.onMessageAttempt(msg);
+
             if (random.nextDouble() <= successProbability) {
                 InetAddress address = InetAddress.getByName(target.host());
                 DatagramPacket packet = new DatagramPacket(data, data.length, address, target.port());
                 socket.send(packet);
+                if (monitor != null) monitor.onMessageDelivered(msg);
             } else {
-                System.out.println("Message lost: " + msg.type() + " to Node " + target.id());
+                // Monitor-Zählung und optionaler Console-Print
+                if (monitor != null) monitor.onMessageLost(msg);
+                if (PRINT_LOSS) {
+                    System.out.printf("Message LOST: %s %d->%d%n",
+                            msg.type(), msg.senderId(), target.id());
+                }
             }
 
         } catch (IOException e) {
@@ -49,9 +64,7 @@ public class UDPTransport {
     }
 
     public void broadcast(Message msg, List<NodeInfo> peers) {
-        for (NodeInfo peer : peers) {
-            send(msg, peer);
-        }
+        for (NodeInfo peer : peers) send(msg, peer);
     }
 
     public Message receive() {
@@ -67,9 +80,8 @@ public class UDPTransport {
                 return (Message) ois.readObject();
             }
         } catch (SocketTimeoutException e) {
-            return null; // nichts empfangen, weiterlaufen
+            return null;
         } catch (SocketException e) {
-            // passiert bei close()
             return null;
         } catch (IOException | ClassNotFoundException e) {
             if (!closed) e.printStackTrace();

@@ -11,72 +11,80 @@ public class Node {
     private final Clock clock;
     private final UDPTransport transport;
     private final NodeConfig cfg;
+    private final SimulationMonitor monitor;
 
-    // Laufzeit-Flags
     private final AtomicBoolean running = new AtomicBoolean(true);
-    private volatile boolean alive = true;   // temporärer Ausfall möglich
+    private volatile boolean alive = true;
     public volatile boolean isMaster = false;
 
-    // Threads
     private Thread clockThread;
     private Thread listenerThread;
     private Thread berkeleyThread;
     private Thread heartbeatThread;
     private Thread monitorThread;
 
-    // Wahl-/FD-Zustände
+    // Liveness / Wahl
     private volatile long lastHeartbeatMs = System.currentTimeMillis();
     private volatile boolean electionInProgress = false;
     private volatile boolean gotOkFromHigher = false;
     private volatile int currentMasterId = -1;
     private volatile long electionCooldownUntilMs = 0L;
-    private volatile int missedHbCount = 0; // Debounce-Zähler
+    private volatile int missedHbCount = 0;
 
     private final Random rnd = new Random();
 
-    // Berkeley-Messzustand
+    // Berkeley
     private final Object lock = new Object();
     private final AtomicInteger seqGen = new AtomicInteger(1);
     private boolean firstSync = true;
 
-    // reqId -> t1
     private final Map<Integer, Double> pendingT1 = new HashMap<>();
-    // peerId -> Samples
     private final Map<Integer, List<OffsetSample>> samplesByPeer = new HashMap<>();
 
     private static class OffsetSample {
-        final double offset; // t2 - (t1 + t3)/2
-        final double rtt;
+        final double offset; final double rtt;
         OffsetSample(double offset, double rtt) { this.offset = offset; this.rtt = rtt; }
     }
 
-    // Convenience-Konstruktor (Defaults)
+    // De-dup Guards für Monitor
+    private volatile boolean inFailStop = false;
+    private volatile int lastNotifiedMasterId = -1;
+
+    // Konstruktoren (mit/ohne Monitor/Config)
     public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport) {
-        this(info, peers, drift, initialTime, transport, NodeConfig.defaults());
+        this(info, peers, drift, initialTime, transport, NodeConfig.defaults(), null);
     }
 
     public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg) {
+        this(info, peers, drift, initialTime, transport, cfg, null);
+    }
+
+    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg, SimulationMonitor monitor) {
         this.info = info;
         this.peers = peers;
         this.clock = new Clock(initialTime, drift);
         this.transport = transport;
         this.cfg = cfg;
+        this.monitor = monitor;
     }
 
-    // Starten
+    // Start: KEIN onNodeStart hier (Demo meldet Start einheitlich)
     public void start() {
         clockThread = new Thread(this::runClock, "ClockThread-" + info.id()); clockThread.setDaemon(true); clockThread.start();
         listenerThread = new Thread(this::runListener, "ListenerThread-" + info.id()); listenerThread.setDaemon(true); listenerThread.start();
         berkeleyThread = new Thread(this::runBerkeley, "BerkeleyThread-" + info.id()); berkeleyThread.setDaemon(true); berkeleyThread.start();
         heartbeatThread = new Thread(this::runHeartbeat, "HeartbeatThread-" + info.id()); heartbeatThread.setDaemon(true); heartbeatThread.start();
         monitorThread = new Thread(this::runMonitor, "MonitorThread-" + info.id()); monitorThread.setDaemon(true); monitorThread.start();
+
         log("Node gestartet.");
     }
 
-    // Stoppen
-    public void stop() {
+    // Stop-Overloads (permanent/geregelt)
+    public void stop() { stop(false); }
+
+    public void stop(boolean permanent) {
         running.set(false);
-        transport.close(); // entblockt receive()
+        transport.close();
 
         interruptSilently(clockThread);
         interruptSilently(listenerThread);
@@ -90,16 +98,21 @@ public class Node {
         joinSilently(heartbeatThread, 1000);
         joinSilently(monitorThread, 1000);
 
+        if (monitor != null) monitor.onNodeStop(info.id(), permanent);
         log("Node gestoppt.");
     }
 
-    // Fail-Stop API
     public boolean isAlive() { return alive; }
 
-    // temporärer Ausfall: kommt NICHT als Master zurück; nach Downtime Wahl starten
+    // Temporärer Fail-Stop
     public void failTemporarily(long downtimeMs) {
         if (!running.get() || !alive) return;
+        if (!inFailStop) {
+            inFailStop = true;
+            if (monitor != null) monitor.onFailStopStart(info.id(), downtimeMs);
+        }
         log("Fail-Stop (temporär) für " + downtimeMs + "ms");
+
         isMaster = false;
         alive = false;
         clock.pause();
@@ -108,16 +121,20 @@ public class Node {
             try { Thread.sleep(downtimeMs); } catch (InterruptedException ignored) {}
             clock.resume();
             alive = true;
+            if (inFailStop) {
+                inFailStop = false;
+                if (monitor != null) monitor.onFailStopEnd(info.id());
+            }
             electionCooldownUntilMs = System.currentTimeMillis() + cfg.graceAfterCoordMs;
             log("Node wieder aktiv (Return von Fail-Stop).");
             if (!isMaster) startElection();
         }, "FailReturn-" + info.id()).start();
     }
 
-    // permanenter Ausfall
+    // Permanenter Fail-Stop
     public void failPermanently() {
         log("PERMANENTER Fail-Stop – Node stoppt.");
-        stop();
+        stop(true);
     }
 
 // Threads
@@ -125,7 +142,10 @@ public class Node {
     private void runClock() {
         try {
             while (running.get()) {
-                if (alive) clock.tick();
+                if (alive) {
+                    clock.tick();
+                    if (monitor != null) monitor.updateNodeTime(info.id(), clock.getTime());
+                }
                 Thread.sleep(1000);
             }
         } catch (InterruptedException ignored) {}
@@ -169,14 +189,10 @@ public class Node {
             try {
                 if (alive && !isMaster) {
                     long nowMs = System.currentTimeMillis();
-                    if (nowMs - lastHeartbeatMs > cfg.heartbeatTimeoutMs) {
-                        missedHbCount++;
-                    } else {
-                        missedHbCount = 0;
-                    }
-                    if (!electionInProgress &&
-                            nowMs >= electionCooldownUntilMs &&
-                            missedHbCount >= cfg.missedHbThreshold) {
+                    if (nowMs - lastHeartbeatMs > cfg.heartbeatTimeoutMs) missedHbCount++;
+                    else missedHbCount = 0;
+
+                    if (!electionInProgress && nowMs >= electionCooldownUntilMs && missedHbCount >= cfg.missedHbThreshold) {
                         startElection();
                         missedHbCount = 0;
                     }
@@ -186,18 +202,13 @@ public class Node {
         }
     }
 
-// Berkeley-Runde
-
+    // Berkeley-Runde
     private void runBerkeleySyncRound() {
         if (!running.get() || !alive) return;
+        if (monitor != null) monitor.onSyncStart(info.id());
         log("Starte Berkeley-Sync-Runde...");
 
-        synchronized (lock) {
-            pendingT1.clear();
-            samplesByPeer.clear();
-        }
-
-        // Probes senden
+        synchronized (lock) { pendingT1.clear(); samplesByPeer.clear(); }
         for (NodeInfo peer : peers) {
             for (int i = 0; i < cfg.probes; i++) {
                 if (!running.get() || !alive) return;
@@ -208,12 +219,9 @@ public class Node {
                 try { Thread.sleep(2); } catch (InterruptedException ignored) { return; }
             }
         }
-
-        // kurze Sammelzeit
         try { Thread.sleep(100); } catch (InterruptedException ignored) { return; }
         if (!running.get() || !alive) return;
 
-        // min-RTT je Peer
         Map<Integer, Double> bestOffsetByPeer = new HashMap<>();
         synchronized (lock) {
             for (NodeInfo peer : peers) {
@@ -226,7 +234,6 @@ public class Node {
             }
         }
 
-        // Fault-tolerantes Mittel
         Map<Integer, Double> offsetsInclMaster = new HashMap<>(bestOffsetByPeer);
         offsetsInclMaster.put(info.id(), 0.0);
 
@@ -242,10 +249,8 @@ public class Node {
         double E = average(inliers, offsetsInclMaster);
         firstSync = false;
 
-        // Master anpassen
         clock.adjust(E);
 
-        // Slaves anpassen
         for (NodeInfo peer : peers) {
             Double eak = bestOffsetByPeer.get(peer.id());
             if (eak == null) continue;
@@ -255,9 +260,9 @@ public class Node {
 
         log(String.format("Berkeley-Sync fertig. E=%+.6f s, gamma=%.6f, inliers=%s, offsets=%s",
                 E, gammaUse, inliers, bestOffsetByPeer));
+        if (monitor != null) monitor.onSyncEnd(info.id(), E, gammaUse, inliers);
     }
 
-    // Cluster-Find (größte Menge innerhalb γ)
     private Set<Integer> largestClusterWithinGamma(Map<Integer, Double> offsets, double gamma) {
         List<Map.Entry<Integer, Double>> list = new ArrayList<>(offsets.entrySet());
         list.sort(Comparator.comparingDouble(Map.Entry::getValue));
@@ -265,8 +270,7 @@ public class Node {
         while (i < list.size()) {
             while (j + 1 < list.size() && list.get(j + 1).getValue() - list.get(i).getValue() <= gamma) j++;
             if (j - i > bj - bi) { bi = i; bj = j; }
-            i++;
-            if (i > j) j = i;
+            i++; if (i > j) j = i;
         }
         Set<Integer> ids = new HashSet<>();
         for (int k = bi; k <= bj; k++) ids.add(list.get(k).getKey());
@@ -279,13 +283,13 @@ public class Node {
         return n == 0 ? 0.0 : s / n;
     }
 
-// Message-Handling
+// Nachrichtenverarbeitung
 
     private void handleMessage(Message msg) {
         switch (msg.type()) {
             case TIME_REQUEST -> onTimeRequest(msg);
             case TIME_RESPONSE -> onTimeResponse(msg);
-            case TIME_ADJUST -> onTimeAdjust(msg); // WICHTIG: Handler vorhanden
+            case TIME_ADJUST -> onTimeAdjust(msg);
             case HEARTBEAT -> onHeartbeat(msg);
             case ELECTION -> onElection(msg);
             case ELECTION_OK -> onElectionOk(msg);
@@ -316,12 +320,11 @@ public class Node {
     }
 
     private void onTimeAdjust(Message msg) {
-        if (!alive || isMaster) return; // Slaves wenden Korrektur an; Master nicht
+        if (!alive || isMaster) return;
         clock.adjust(msg.offset());
         log(String.format("Clock adjust %+.6f s (vom Master)", msg.offset()));
     }
 
-    // Heartbeat: keine Master-Umschaltung außer auf höhere ID (Demotion)
     private void onHeartbeat(Message msg) {
         if (!alive) return;
         long now = System.currentTimeMillis();
@@ -330,6 +333,7 @@ public class Node {
             currentMasterId = msg.senderId();
             lastHeartbeatMs = now;
             electionCooldownUntilMs = now + cfg.graceAfterCoordMs;
+            notifyMasterIfChanged(currentMasterId, false);
             log("Erster Heartbeat: vermuteter Master ist " + currentMasterId);
             return;
         }
@@ -338,14 +342,13 @@ public class Node {
             lastHeartbeatMs = now;
             electionCooldownUntilMs = now + cfg.graceAfterCoordMs;
         } else if (msg.senderId() > currentMasterId) {
-            // Demotion auf höheren Master (beschleunigt Konvergenz)
             currentMasterId = msg.senderId();
             lastHeartbeatMs = now;
             electionCooldownUntilMs = now + cfg.graceAfterCoordMs;
             isMaster = false;
+            notifyMasterIfChanged(currentMasterId, true); // Demotion
             log("Heartbeat höherer ID akzeptiert, neuer vermuteter Master: " + currentMasterId);
         }
-        // Heartbeats niedrigerer ID ignorieren
     }
 
     private void onElection(Message msg) {
@@ -355,7 +358,6 @@ public class Node {
             NodeInfo src = peerById(msg.senderId());
             if (src != null) {
                 send(Message.electionOk(info.id(), src.id()), src);
-                // Status bekräftigen
                 announceCoordinator();
             }
             return;
@@ -370,14 +372,11 @@ public class Node {
         }
     }
 
-    private void onElectionOk(Message msg) {
-        gotOkFromHigher = true;
-    }
+    private void onElectionOk(Message msg) { gotOkFromHigher = true; }
 
     private void onCoordinator(Message msg) {
         if (!alive) return;
 
-        // Koordinator von niedrigerer ID nicht akzeptieren (Bully)
         if (msg.senderId() < info.id()) {
             if (!isMaster && !electionInProgress) startElection();
             return;
@@ -390,6 +389,8 @@ public class Node {
         gotOkFromHigher = false;
         lastHeartbeatMs = System.currentTimeMillis();
         electionCooldownUntilMs = lastHeartbeatMs + cfg.graceAfterCoordMs;
+
+        notifyMasterIfChanged(currentMasterId, false);
         log("Neuer Master ist " + currentMasterId);
     }
 
@@ -397,6 +398,7 @@ public class Node {
         if (electionInProgress || !running.get() || !alive) return;
         electionInProgress = true;
         gotOkFromHigher = false;
+        if (monitor != null) monitor.onElectionStart(info.id());
         log("Starte Wahl (Bully) ...");
 
         int higherSent = 0;
@@ -450,19 +452,28 @@ public class Node {
         lastHeartbeatMs = System.currentTimeMillis();
         electionCooldownUntilMs = lastHeartbeatMs + cfg.graceAfterCoordMs;
 
-        // Mehrfach announcen gegen Paketverlust
         for (int i = 0; i < cfg.coordinatorAnnounceRepeats; i++) {
             announceCoordinator();
             try { Thread.sleep(cfg.coordinatorAnnounceIntervalMs); } catch (InterruptedException ignored) {}
         }
+        notifyMasterIfChanged(currentMasterId, false);
         log("Ich bin der neue Master.");
     }
 
     private void announceCoordinator() {
+        if (monitor != null) monitor.onCoordinatorAnnounce(info.id());
         for (NodeInfo p : peers) send(Message.coordinatorElected(info.id(), p.id()), p);
     }
 
-// Utils
+    // Notify helper (dedupe)
+    private void notifyMasterIfChanged(int newMasterId, boolean demotion) {
+        if (newMasterId == lastNotifiedMasterId) return;
+        lastNotifiedMasterId = newMasterId;
+        if (monitor != null) {
+            if (demotion) monitor.onDemotedTo(newMasterId);
+            else monitor.onMasterElected(newMasterId);
+        }
+    }
 
     private NodeInfo peerById(int id) {
         for (NodeInfo n : peers) if (n.id() == id) return n;
@@ -480,9 +491,9 @@ public class Node {
     private static void interruptSilently(Thread t) { if (t != null) try { t.interrupt(); } catch (Exception ignored) {} }
     private static void joinSilently(Thread t, long ms) { if (t != null) try { t.join(ms); } catch (InterruptedException ignored) {} }
 
-    // Getter
     public NodeInfo getInfo() { return info; }
     public double getLocalTime() { return clock.getTime(); }
     public Clock getClock() { return clock; }
     public List<NodeInfo> getPeers() { return peers; }
-    public boolean getIsMaster() { return isMaster; }}
+    public boolean getIsMaster() { return isMaster; }
+}
