@@ -1,28 +1,24 @@
 package de.thws;
 
 public class Clock {
-    /*
-     time = 1000;
-       → Die simulierte Uhr steht auf 1000 Sekunden.
+/*
+Slewing-Clock:
+- adjust(offset) plant nur eine Korrektur ein (remainingOffset).
+- tick() trägt pro Tick höchstens maxSlewPerSec von remainingOffset ab.
+- Zeit geht nie rückwärts: drift + step >= MIN_ADVANCE.
+- drift ist die Basis-Zeit pro Tick (z.B. 0.95 s pro Sekunde).
+*/
 
-     time += drift;   // z.B. drift = 0.95
-       → Die Uhr rückt um 0.95 simulierte Sekunden vor.
+    private double time;            // simulierte Zeit in Sekunden
+    private double drift;           // z.B. 0.95 = 5% zu langsam (Sekunden pro Tick)
+    private boolean paused;         // true = Fail-Stop, Uhr pausiert
 
-     adjust(3.5);
-       → Die Uhr wird um 3.5 Sekunden korrigiert.
-    */
+    // Slewing-Status
+    private double remainingOffset = 0.0;   // noch auszubringende Korrektur (Sekunden)
+    private double maxSlewPerSec = 0.05;  // maximale Korrektur pro Tick (Sekunden/Tick), z.B. 50 ms/s
 
-
-
-    //angabe vielleicht so machen: nach einem tag hat man 5 sekundeen drift oder so beim programm start.
-
-
-
-
-    private double time;    // simulierte Zeit in Sekunden
-    private double drift;   // z.B. 0.95 = 5% zu langsam
-    private boolean paused; // true = Node ist fail-stop, Uhr pausiert
-    //simon fragen, ob er der meinung ist einen ausfall einfach mit einem boolean zu simulieren, weil ich weiß nicht ob das passt.
+    // Min. positiver Fortschritt pro Tick, um strikt monoton zu bleiben
+    private static final double MIN_ADVANCE = 1e-9;
 
     public Clock(double initialTime, double drift) {
         this.time = initialTime;
@@ -31,35 +27,59 @@ public class Clock {
     }
 
     /**
-     * Jede Tick-Operation simuliert das Fortschreiten der Zeit
+     * Jede Tick-Operation simuliert das Fortschreiten der Zeit.
+     * Dabei wird ggf. ein Teil der offenen Korrektur (remainingOffset) sanft "ausgeschlichen".
      */
     public synchronized void tick() {
-        if (!paused) {
-            time += drift;  //nur drift zu addieren passt, weil wir quasi von eine tick=1 sekunde ausgehen und drift dann bspw. 0,95 sekunden sind.
+        if (paused) return;
+
+        double step = 0.0;
+
+        if (remainingOffset != 0.0) {
+            // gewünschter Korrekturanteil für diesen Tick (begrenzt durch maxSlewPerSec)
+            double want = Math.copySign(
+                    Math.min(Math.abs(maxSlewPerSec), Math.abs(remainingOffset)),
+                    remainingOffset
+            );
+
+            // Sicherstellen, dass wir nicht rückwärts gehen:
+            // Gesamtzuwachs = drift + want >= MIN_ADVANCE
+            if (drift + want < MIN_ADVANCE) {
+                // so weit verlangsamen, dass wir knapp > 0 bleiben
+                want = -(drift - MIN_ADVANCE);
+            }
+
+            step = want;
+            remainingOffset -= want;
         }
+
+        time += drift + step;
     }
 
     /**
-     * Offset-Korrektur (vom Berkeley Algorithmus gesendet)
+     * Offset-Korrektur (vom Berkeley/TEMPO-Algorithmus gesendet)
+     * - Kein harter Sprung mehr; es wird nur die verbleibende Korrekturmenge erhöht.
      */
     public synchronized void adjust(double offset) {
         if (!paused) {
-            time += offset;
+            remainingOffset += offset;
         }
     }
 
     /**
-     * Liefert die aktuelle simulierte Zeit
+     * Liefert die aktuelle simulierte Zeit.
      */
     public synchronized double getTime() {
         return time;
     }
 
     /**
-     * Setzt die Zeit explizit (optional)
+     * Setzt die Zeit explizit.
+     * Hinweis: Für Initialisierung/Join gedacht. Bei Laufbetrieb wegen Monotonie vermeiden.
      */
     public synchronized void setTime(double time) {
         this.time = time;
+        // optional: remainingOffset = 0; // falls man harte Setzung als "Reset" betrachtet
     }
 
     public synchronized double getDrift() {
@@ -71,9 +91,27 @@ public class Clock {
     }
 
     /**
+     * Konfiguriert die max. Slew-Rate (Sekunden pro Tick).
+     * Beispielwerte:
+     * - 0.05 ... 0.10 für sichtbare Demos
+     * - sehr klein (ppm-Bereich), wenn realitätsnäheres Verhalten gewünscht ist
+     */
+    public synchronized void setMaxSlewPerSec(double v) {
+        this.maxSlewPerSec = Math.max(1e-9, v);
+    }
+
+    public synchronized double getMaxSlewPerSec() {
+        return maxSlewPerSec;
+    }
+
+    public synchronized double getRemainingOffset() {
+        return remainingOffset;
+    }
+
+    /**
      * Pausiert die Clock (Fail-Stop)
      */
-        public synchronized void pause() {
+    public synchronized void pause() {
         paused = true;
     }
 
@@ -84,12 +122,15 @@ public class Clock {
         paused = false;
     }
 
-    @Override
-    public synchronized String toString() {
-        return String.format("Clock(time=%.3f, drift=%.4f, paused=%b)", time, drift, paused);
+    public synchronized boolean isPaused() {
+        return paused;
     }
 
-    public boolean isPaused() {
-        return paused;
+    @Override
+    public synchronized String toString() {
+        return String.format(
+                "Clock(time=%.3f, drift=%.4f, paused=%b, remainingOffset=%+.6f, maxSlewPerSec=%.6f)",
+                time, drift, paused, remainingOffset, maxSlewPerSec
+        );
     }
 }

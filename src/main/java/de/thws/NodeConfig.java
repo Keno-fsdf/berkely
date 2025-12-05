@@ -57,21 +57,22 @@ public class NodeConfig {
     public static NodeConfig defaults() {
         return new NodeConfig(
                 7,           // probes
-                0.020,       // tmBoundSeconds
-                2.0,         // gammaBaseSeconds
+                0.020,       // tmBoundSeconds (20 ms, Paper-nah)
+                0.020,       // gammaBaseSeconds (klein; wird dynamisch von 4ε+2pT überdeckt)
                 5000,        // syncIntervalMs
 
                 500,         // heartbeatIntervalMs
-                2800,        // heartbeatTimeoutMs (etwas träger unter Loss)
-                2,           // missedHbThreshold (2 Timeouts in Folge)
+                2800,        // heartbeatTimeoutMs
+                2,           // missedHbThreshold
 
-                1200,        // electionTimeoutMs (leicht erhöht)
-                2200,        // coordinatorWaitMs (leicht erhöht)
+                1200,        // electionTimeoutMs
+                2200,        // coordinatorWaitMs
                 300,         // electionBackoffBaseMs
-                600,         // electionBackoffJitterMs (größerer Jitter)
+                600,         // electionBackoffJitterMs
                 1500,        // graceAfterCoordMs
 
                 3,           // coordinatorAnnounceRepeats
                 100          // coordinatorAnnounceIntervalMs
         );
-    }}
+    }
+}

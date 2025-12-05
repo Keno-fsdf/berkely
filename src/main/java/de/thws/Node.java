@@ -50,6 +50,11 @@ public class Node {
     private volatile boolean inFailStop = false;
     private volatile int lastNotifiedMasterId = -1;
 
+    // TEMPO-Join-Handling: erster großer Offset hart setzen, danach nur slewen
+    private volatile boolean firstAdjustOnThisNode = true;
+    private static final double JOIN_HARD_SET_THRESHOLD_SECONDS = 1.0; // >1s → einmalig hart setzen
+    private static final double P_BOUND_DEFAULT = 1e-4; // 100 ppm Bound (Paper-Niveau)
+
     // Konstruktoren (mit/ohne Monitor/Config)
     public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport) {
         this(info, peers, drift, initialTime, transport, NodeConfig.defaults(), null);
@@ -202,12 +207,13 @@ public class Node {
         }
     }
 
-    // Berkeley-Runde
+    // Berkeley-Runde (TEMPO-orientiert)
     private void runBerkeleySyncRound() {
         if (!running.get() || !alive) return;
         if (monitor != null) monitor.onSyncStart(info.id());
         log("Starte Berkeley-Sync-Runde...");
 
+        // 1) Probing
         synchronized (lock) { pendingT1.clear(); samplesByPeer.clear(); }
         for (NodeInfo peer : peers) {
             for (int i = 0; i < cfg.probes; i++) {
@@ -222,35 +228,59 @@ public class Node {
         try { Thread.sleep(100); } catch (InterruptedException ignored) { return; }
         if (!running.get() || !alive) return;
 
+        // 2) Beste Offsets je Peer (min-RTT innerhalb TM), min RTT sammeln
         Map<Integer, Double> bestOffsetByPeer = new HashMap<>();
+        Map<Integer, Double> minRttByPeer     = new HashMap<>();
         synchronized (lock) {
             for (NodeInfo peer : peers) {
                 List<OffsetSample> list = samplesByPeer.getOrDefault(peer.id(), Collections.emptyList());
                 OffsetSample best = null;
-                for (OffsetSample s : list) if (s.rtt <= cfg.tmBoundSeconds && (best == null || s.rtt < best.rtt)) best = s;
-                if (best == null) for (OffsetSample s : list) if (best == null || s.rtt < best.rtt) best = s;
-                if (best != null) bestOffsetByPeer.put(peer.id(), best.offset);
-                else log("Warnung: keine gültigen Samples von Peer " + peer.id());
+                double minRtt = Double.POSITIVE_INFINITY;
+                for (OffsetSample s : list) {
+                    if (s.rtt < minRtt) minRtt = s.rtt;
+                    if (s.rtt <= cfg.tmBoundSeconds && (best == null || s.rtt < best.rtt)) {
+                        best = s;
+                    }
+                }
+                if (best == null) {
+                    for (OffsetSample s : list) if (best == null || s.rtt < best.rtt) best = s;
+                }
+                if (best != null) {
+                    bestOffsetByPeer.put(peer.id(), best.offset);
+                    minRttByPeer.put(peer.id(), minRtt);
+                } else {
+                    log("Warnung: keine gültigen Samples von Peer " + peer.id());
+                }
             }
         }
 
+        // 3) Offsets inkl. Master (0.0)
         Map<Integer, Double> offsetsInclMaster = new HashMap<>(bestOffsetByPeer);
         offsetsInclMaster.put(info.id(), 0.0);
 
-        double gammaUse;
-        if (firstSync) gammaUse = 1e9;
-        else {
-            double min = Double.POSITIVE_INFINITY, max = Double.NEGATIVE_INFINITY;
-            for (double v : offsetsInclMaster.values()) { min = Math.min(min, v); max = Math.max(max, v); }
-            gammaUse = Math.max(cfg.gammaBaseSeconds, 0.25 * (max - min));
-        }
+        // 4) Paper-basierte Bounds: ε und γ
+        double minRttGlobal = minRttByPeer.values().stream().mapToDouble(v -> v).min().orElse(cfg.tmBoundSeconds);
+        double epsilon = Math.max(0.0, (cfg.tmBoundSeconds - minRttGlobal) / 2.0);
+        double Tsec = cfg.syncIntervalMs / 1000.0;
+        double pEst = Math.max(P_BOUND_DEFAULT, Math.abs(clock.getDrift() - 1.0)); // einfacher Bound
+        double gammaUse = Math.max(cfg.gammaBaseSeconds, 4.0 * epsilon + 2.0 * pEst * Tsec);
 
+        // 5) Inlier-Cluster innerhalb γ und fault-toleranter Mittelwert
         Set<Integer> inliers = largestClusterWithinGamma(offsetsInclMaster, gammaUse);
         double E = average(inliers, offsetsInclMaster);
         firstSync = false;
 
-        clock.adjust(E);
+        // 6) Master-Korrektur: Join-Fast-Path (hart) oder Slewing
+        if (firstAdjustOnThisNode && Math.abs(E) > JOIN_HARD_SET_THRESHOLD_SECONDS) {
+            clock.setTime(clock.getTime() + E); // einmalig hart setzen beim Join
+            log(String.format("Clock set %+.6f s (Master, Join-Fast-Path)", E));
+        } else {
+            clock.adjust(E); // danach nur noch slewen
+            log(String.format("Clock adjust %+.6f s (Master, slewing)", E));
+        }
+        firstAdjustOnThisNode = false;
 
+        // 7) Korrekturen an Slaves (auch „faulty“)
         for (NodeInfo peer : peers) {
             Double eak = bestOffsetByPeer.get(peer.id());
             if (eak == null) continue;
@@ -258,8 +288,8 @@ public class Node {
             send(Message.timeAdjust(info.id(), peer.id(), corr), peer);
         }
 
-        log(String.format("Berkeley-Sync fertig. E=%+.6f s, gamma=%.6f, inliers=%s, offsets=%s",
-                E, gammaUse, inliers, bestOffsetByPeer));
+        log(String.format("Berkeley-Sync fertig. E=%+.6f s, gamma=%.6f, eps=%.6f, inliers=%s, offsets=%s",
+                E, gammaUse, epsilon, inliers, bestOffsetByPeer));
         if (monitor != null) monitor.onSyncEnd(info.id(), E, gammaUse, inliers);
     }
 
@@ -321,8 +351,16 @@ public class Node {
 
     private void onTimeAdjust(Message msg) {
         if (!alive || isMaster) return;
-        clock.adjust(msg.offset());
-        log(String.format("Clock adjust %+.6f s (vom Master)", msg.offset()));
+
+        double off = msg.offset();
+        if (firstAdjustOnThisNode && Math.abs(off) > JOIN_HARD_SET_THRESHOLD_SECONDS) {
+            clock.setTime(clock.getTime() + off); // einmalig hart setzen beim Join
+            log(String.format("Clock set %+.6f s (vom Master, Join-Fast-Path)", off));
+        } else {
+            clock.adjust(off); // danach nur noch slewen
+            log(String.format("Clock adjust %+.6f s (vom Master, slewing)", off));
+        }
+        firstAdjustOnThisNode = false;
     }
 
     private void onHeartbeat(Message msg) {
