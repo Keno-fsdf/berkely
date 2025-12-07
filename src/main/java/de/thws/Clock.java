@@ -15,7 +15,7 @@ Slewing-Clock:
 
     // Slewing-Status
     private double remainingOffset = 0.0;   // noch auszubringende Korrektur (Sekunden)
-    private double maxSlewPerSec = 0.05;  // maximale Korrektur pro Tick (Sekunden/Tick), z.B. 50 ms/s
+    private double maxSlewPerSec = 0.10;  // maximale Korrektur pro Tick (Sekunden/Tick), z.B. 100 ms/s
 
     // Min. positiver Fortschritt pro Tick, um strikt monoton zu bleiben
     private static final double MIN_ADVANCE = 1e-9;
