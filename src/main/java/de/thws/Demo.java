@@ -23,10 +23,10 @@ public class Demo {
 
 
 
-        long durationMs = 15_000; //davor war es 30 sekunden  -->wie lange das Programm läuft bzw. die Demo
+        long durationMs = 30_000; //davor war es 30 sekunden  -->wie lange das Programm läuft bzw. die Demo
         double driftMin = 0.95;
         double driftMax = 1.10;
-        double loss = 1.0;                   // Zustellwahrscheinlichkeit (1.0 = kein Loss)
+        double loss = 0.9;                   // Zustellwahrscheinlichkeit (1.0 = kein Loss)
         boolean randomFail = true;  //ja gut wenn man das auf false macht, dann kommen halt keine Ausfälle mehr von den NODES. Also message ausfälle
         //wird über loss oben gesteuert.
         double failRatePerNodePerSec = 0.02;  //was ist die ausfallchance pro sekunde pro node
