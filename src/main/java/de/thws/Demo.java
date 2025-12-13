@@ -23,10 +23,10 @@ public class Demo {
 
 
 
-        long durationMs = 20_000; //davor war es 30 sekunden  -->wie lange das Programm läuft bzw. die Demo
+        long durationMs = 15_000; //davor war es 30 sekunden  -->wie lange das Programm läuft bzw. die Demo
         double driftMin = 0.95;
         double driftMax = 1.10;
-        double loss = 0.9;                   // Zustellwahrscheinlichkeit (1.0 = kein Loss)
+        double loss = 1.0;                   // Zustellwahrscheinlichkeit (1.0 = kein Loss)
         boolean randomFail = true;  //ja gut wenn man das auf false macht, dann kommen halt keine Ausfälle mehr von den NODES. Also message ausfälle
         //wird über loss oben gesteuert.
         double failRatePerNodePerSec = 0.02;  //was ist die ausfallchance pro sekunde pro node
@@ -47,11 +47,41 @@ dezentral wäre das natürlich auch machbar (z. B. jeder Node wirft selbst per Z
         long downMinMs = 2000;
         long downMaxMs = 5000;
         String masterMode = "highest";       // "highest" oder "random"
-        long seed = System.nanoTime();
+        long seed = System.nanoTime();    // System.nanoTime() kann man austaustauschen für den seed value (bspw: "22003874727500L") und halt dann aber wieder rückgäng machen!!.
+        //also so kann man es reproduzierbar machen, aber nur wenn man den packet-loss und ausfall von nodes auf 0% stellt, aber bitte nochmal prüfen von euch!!
+
+
+
+
+        /* Achtung von chatgpt formartiert (also mein text hat der formatiert und ausgebessert):
+        Genau:
+
+initTime, drift: exakt reproduzierbar.
+Start‑Master (bei master=random): exakt reproduzierbar.
+Fail‑Injection: In jeder Sekunde und für jede Node entscheidet rnd (aus a.seed)
+ob ein Ausfall startet,
+ob permanent vs. temporär,
+die Downtime (dt).
+→ Damit ist prinzipiell auch “wer” und “in welcher Sekunde” deterministisch.
+Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B. currentlyDown.size() < maxConcurrentFails, n.isAlive(), Sets werden durch Scheduler nach dt+100 ms wieder freigegeben). Wegen Thread‑/Scheduling‑Jitter kann sich dadurch im Einzelfall die Eligibility leicht verschieben – dann wirkt sich die gleiche Zufallsfolge etwas anders aus.
+
+         */
+
+
+
         int basePort = 5001;
 
 
 
+
+
+
+
+        // gezielter Master‑Kill (optional) für Vorstellen nützlich. Also so kann man leichter das vorzeigen mit dem master ausfall.
+        boolean killMaster = false; // true = aktuellen Master gezielt ausknipsen
+        long killMasterAtMs = 2000; // nach wie vielen ms (z. B. 2000)
+        boolean killMasterPermanent = false; // true = permanent, false = temporär
+        long killMasterDownMs = 3000; // Dauer (ms) für temporären Fail‑Stop
 
 
 
@@ -125,6 +155,33 @@ dezentral wäre das natürlich auch machbar (z. B. jeder Node wirft selbst per Z
         Set<Integer> permanentlyDead = ConcurrentHashMap.newKeySet();
         ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
+
+
+
+
+
+        // Gezielten Master‑Kill einplanen (optional)
+        if (a.killMaster) {
+            scheduler.schedule(() -> {
+                int mId = monitor.getCurrentMasterId(); // aktuellen Master ermitteln
+                Node target = nodes.stream()
+                        .filter(n -> n.getInfo().id() == mId)
+                        .findFirst().orElse(null);
+                if (target != null && target.isAlive()) {
+                    if (a.killMasterPermanent) {
+                        target.failPermanently();
+                    } else {
+                        target.failTemporarily(a.killMasterDownMs);
+                    }
+                }
+            }, a.killMasterAtMs, TimeUnit.MILLISECONDS);
+        }
+
+
+
+
+
+
         long start = System.currentTimeMillis();
         while (System.currentTimeMillis() - start < a.durationMs) {
             Thread.sleep(1000);
@@ -180,7 +237,8 @@ dezentral wäre das natürlich auch machbar (z. B. jeder Node wirft selbst per Z
         System.out.println();
     }
 
-    // CLI: --key=value
+    // CLI: --key=value -->Hab ich mal gecodet, aber brauchen wir eignetlich gar nicht, hab ich daher auch garnicht getestet, wenn jemand bock hat, kann
+    //er ja mal das programm so über cmd oder so starten und das mit den argumenten probieren. Bzw. wäre gut wenn ihr das mal testen würdest.
     private static Args parseArgs(String[] argv) {
         Args a = new Args();
         for (String s : argv) {
@@ -203,6 +261,11 @@ dezentral wäre das natürlich auch machbar (z. B. jeder Node wirft selbst per Z
                 case "master" -> a.masterMode = v;
                 case "seed" -> a.seed = Long.parseLong(v);
                 case "basePort" -> a.basePort = Integer.parseInt(v);
+                case "killMaster" -> a.killMaster = Boolean.parseBoolean(v);
+                case "killAt" -> a.killMasterAtMs = Long.parseLong(v);
+                case "killMasterPermanent" -> a.killMasterPermanent = Boolean.parseBoolean(v);
+                case "killMasterDownMs" -> a.killMasterDownMs = Long.parseLong(v);
+
             }
         }
         return a;
