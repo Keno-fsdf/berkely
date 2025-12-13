@@ -23,6 +23,19 @@ public record Message(
         COORDINATOR_ELECTED
     }
 
+
+    /*
+Election messages
+•	ELECTION: suspect master (silence AND grace over) → send to all higher IDs.
+•	on ELECTION: if receiver has higher ID (or is master) → reply ELECTION_OK; do NOT start local election while in grace.
+•	ELECTION_OK: candidate sets gotOkFromHigher=true; waits coordinatorWaitMs for COORDINATOR_ELECTED.
+•	COORDINATOR_ELECTED: sender self promotes (no higher OK) → broadcast; receivers adopt as master, reset lastHeartbeatMs, start grace.
+•	Demotion: on HEARTBEAT from higher ID → adopt higher (isMaster=false), reset lastHeartbeatMs, start grace.
+•	Gate to startElection: (silence ≥ missedHbThreshold×heartbeatTimeoutMs) AND (now ≥ electionCooldownUntilMs).
+*/
+
+
+
     // Berkeley
     public static Message timeRequest(int senderId, int targetId, int reqId, double t1) {
         return new Message(senderId, targetId, Type.TIME_REQUEST, reqId, t1, 0.0);

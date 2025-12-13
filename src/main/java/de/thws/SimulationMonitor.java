@@ -9,7 +9,7 @@ public class SimulationMonitor {
     public enum Verbosity {
         SUMMARY,  // Dashboard: kompakt (keine Einzel-MSG-LOST Events)
         DETAIL,   // Dashboard: zeigt alle Events
-        DEBUG     // wie DETAIL; Platzhalter für zusätzliche Debug-Ausgaben
+        DEBUG     // wie DETAIL; Platzhalter für zusätzliche Debug-Ausgaben -->Noch nicht implementiert.
     }
 
     public static class NodeState {
@@ -23,11 +23,14 @@ public class SimulationMonitor {
     }
 
     // Konfiguration
-    private final Verbosity verbosity;
-    private final boolean showLossInDashboard;
-    private final boolean renderMasterChangeDashboard;
-    private final int recentCapacity;
-    private final int rawMax; // max Anzahl an Roh-Events (Begrenzung, um Speicher zu schonen)
+    private final Verbosity verbosity; // SUMMARY = kompakt; DETAIL/DEBUG = alle Events (DEBUG reserviert für extra zeugs beim debuggen, jetzt gerade macht das
+    // kein Unterschied zu Detail ).
+    private final boolean showLossInDashboard; // Ohne diesen Schalter erscheinen Verluste in SUMMARY nur in den Zählern (Δ/total), nicht als Einzellinien.
+    //Zeigt einzelne “MSG LOST …”-Zeilen im Dashboard an (selbst in SUMMARY) -->wenn true.
+    private final boolean renderMasterChangeDashboard; // Rendert bei jedem Master-Wechsel sofort einen vollständigen Dashboard-Snapshot (Zwischenstand).
+    private final int recentCapacity; // Anzahl der Einträge im “Recent events”-Bereich (Ringpuffer). Ältere Einträge werden entfernt; gleiche Events werden zusammengefasst (“× n”).
+
+    private final int rawMax; // Obergrenze für gespeicherte Rohlog-Zeilen (rawEvents). Bei Überschreitung werden die ältesten ~10% verworfen, um Speicher zu sparen.
 
     // Zustände
     private final Map<Integer, NodeState> nodes = new ConcurrentHashMap<>();

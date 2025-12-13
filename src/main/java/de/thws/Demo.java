@@ -14,20 +14,51 @@ public class Demo {
 
     // Konfigurierbare Argumente
     static class Args {
-        int nodes = 5;
-        long durationMs = 30_000;
+        int nodes = 5;  //davor war es 5 stück gewesen
+        //Also kurzer hinweis, ab einer gewissen grenze an ports kann es sein dass es versucht ports zu nutzen die von anderen services/programmen genutzt wird
+        // und dann kommt halt ein fehler darauf bezogen.
+        //Man könnte den port bereich mit dem man arbeitet ändern dafür. Aber ihc halte das für unnötig.
+        //Bei mir geht bei nodes=40 alles aber bei nodes=50 geht es nicht mehr. +
+        // Aber 40 ist meiner Meinung total ausreichend für das hier.
+
+
+
+        long durationMs = 20_000; //davor war es 30 sekunden  -->wie lange das Programm läuft bzw. die Demo
         double driftMin = 0.95;
         double driftMax = 1.10;
         double loss = 0.9;                   // Zustellwahrscheinlichkeit (1.0 = kein Loss)
-        boolean randomFail = true;
-        double failRatePerNodePerSec = 0.02;
-        double permanentDeathProb = 0.10;
-        int maxConcurrentFails = 2;
+        boolean randomFail = true;  //ja gut wenn man das auf false macht, dann kommen halt keine Ausfälle mehr von den NODES. Also message ausfälle
+        //wird über loss oben gesteuert.
+        double failRatePerNodePerSec = 0.02;  //was ist die ausfallchance pro sekunde pro node
+        double permanentDeathProb = 0.10;  //chance das ein node gar nicht mehr zurück kommt
+        int maxConcurrentFails = 2;   //maximale gleichzeitige ausfälle. Ein sicherheitsparamenter
+
+        /*
+        Wir simulieren Ausfälle zentral in der Demo (Fail-Stop, Dauer, Anzahl). Das ist bewusst so gemacht und betrifft nur die Orchestrierung, nicht das Protokoll.
+Das Zeit‑Sync‑ und Wahlprotokoll bleibt vollständig dezentral: Heartbeats, Failure‑Detection, Demotion und Bully laufen ohne zentrale Instanz.
+Grund: Reproduzierbarkeit und Steuerbarkeit. Ohne zentrale Injektion ließen sich Parameter wie Häufigkeit, gleichzeitige Ausfälle oder Down‑Zeiten nicht verlässlich testen.
+
+dezentral wäre das natürlich auch machbar (z. B. jeder Node wirft selbst per Zufall aus), aber dann sind Szenarien/Seeds schwer vergleichbar; zentrale Orchestrierung macht A/B‑Vergleiche und Parameter‑Änderungen-Vergleiche leichter.
+
+         */
+
+
+
         long downMinMs = 2000;
         long downMaxMs = 5000;
         String masterMode = "highest";       // "highest" oder "random"
         long seed = System.nanoTime();
         int basePort = 5001;
+
+
+
+
+
+
+
+
+
+
     }
 
     // Fester Schalter: Console-Prints für verlorene Nachrichten AN
@@ -36,7 +67,7 @@ public class Demo {
     public static void main(String[] argv) throws SocketException, InterruptedException {
         Args a = parseArgs(argv);
 
-        // Console-Prints im UDPTransport aktivieren (KEIN Überschreiben mehr)
+        // Console-Prints im UDPTransport aktivieren
         UDPTransport.setPrintLoss(PRINT_LOSS);
 
         Random rnd = new Random(a.seed);
