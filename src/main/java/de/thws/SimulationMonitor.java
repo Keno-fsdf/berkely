@@ -4,12 +4,13 @@ import java.time.LocalTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+
 public class SimulationMonitor {
 
     public enum Verbosity {
         SUMMARY,  // Dashboard: kompakt (keine Einzel-MSG-LOST Events)
         DETAIL,   // Dashboard: zeigt alle Events
-        DEBUG     // wie DETAIL; Platzhalter für zusätzliche Debug-Ausgaben -->Noch nicht implementiert.
+        DEBUG     // wie DETAIL; Platzhalter
     }
 
     public static class NodeState {
@@ -23,14 +24,11 @@ public class SimulationMonitor {
     }
 
     // Konfiguration
-    private final Verbosity verbosity; // SUMMARY = kompakt; DETAIL/DEBUG = alle Events (DEBUG reserviert für extra zeugs beim debuggen, jetzt gerade macht das
-    // kein Unterschied zu Detail ).
-    private final boolean showLossInDashboard; // Ohne diesen Schalter erscheinen Verluste in SUMMARY nur in den Zählern (Δ/total), nicht als Einzellinien.
-    //Zeigt einzelne “MSG LOST …”-Zeilen im Dashboard an (selbst in SUMMARY) -->wenn true.
-    private final boolean renderMasterChangeDashboard; // Rendert bei jedem Master-Wechsel sofort einen vollständigen Dashboard-Snapshot (Zwischenstand).
-    private final int recentCapacity; // Anzahl der Einträge im “Recent events”-Bereich (Ringpuffer). Ältere Einträge werden entfernt; gleiche Events werden zusammengefasst (“× n”).
-
-    private final int rawMax; // Obergrenze für gespeicherte Rohlog-Zeilen (rawEvents). Bei Überschreitung werden die ältesten ~10% verworfen, um Speicher zu sparen.
+    private final Verbosity verbosity;
+    private final boolean showLossInDashboard;
+    private final boolean renderMasterChangeDashboard;
+    private final int recentCapacity;
+    private final int rawMax;
 
     // Zustände
     private final Map<Integer, NodeState> nodes = new ConcurrentHashMap<>();
@@ -91,7 +89,6 @@ public class SimulationMonitor {
                 .formatted(nodeCount, loss, randomFail, failRate, permProb, durationMs/1000));
         addEvent("Simulation start: nodes=%d, loss=%.2f, randomFail=%b, failRate=%.3f/s, permProb=%.2f, duration=%ds"
                 .formatted(nodeCount, loss, randomFail, failRate, permProb, durationMs/1000), false);
-        // KEIN Start-Dashboard (nur Info)
     }
 
     // Node-API
@@ -184,6 +181,7 @@ public class SimulationMonitor {
 
     // Message-API
     public void onMessageAttempt(Message msg) {
+        // MONITOR_EVENT gibi şeyleri burada saymak istemiyorsanız, isterseniz filter ekleriz.
         sentTotal.get(msg.type()).incrementAndGet();
         sentDelta.get(msg.type()).incrementAndGet();
         logRaw("MsgSend", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
@@ -193,7 +191,6 @@ public class SimulationMonitor {
         lostTotal.get(msg.type()).incrementAndGet();
         lostDelta.get(msg.type()).incrementAndGet();
         logRaw("MsgLost", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
-        // ins Dashboard nur, wenn gewünscht (beeinflusst nicht das Rohlog)
         if (verbosity != Verbosity.SUMMARY || showLossInDashboard) {
             addEvent("MSG LOST: %s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()), true);
         }
@@ -203,7 +200,6 @@ public class SimulationMonitor {
         logRaw("MsgDelivered", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
     }
 
-    // Rohlog API (optional auslesbar)
     public List<String> getRawEvents(int lastN) {
         synchronized (rawEvents) {
             int from = Math.max(0, rawEvents.size() - lastN);
@@ -219,7 +215,6 @@ public class SimulationMonitor {
                 .append(" | Last Sync: ").append(lastSyncSummary)
                 .append(" | ").append(title).append("\n");
 
-        // zusätzliche Metriken: Skew (max, σ)
         double masterTime = (currentMasterId != -1 && nodes.containsKey(currentMasterId)) ? nodes.get(currentMasterId).time : 0.0;
         List<Double> diffs = new ArrayList<>();
         for (NodeState n : nodes.values()) if (!n.dead && n.alive) diffs.add(Math.abs(n.time - masterTime));
@@ -256,34 +251,26 @@ public class SimulationMonitor {
         System.out.print(sb);
     }
 
-    // Dashboard-Event-Puffer + Komprimierung; Rohlog bleibt unverändert
     private void addEvent(String e, boolean eligibleForDashboard) {
-        // Rohlog: immer
         logRaw("Event", e);
 
         if (!eligibleForDashboard) return;
 
-        // Dashboard: je nach Verbosity ggf. filtern (keine MSG LOST in SUMMARY)
         if (verbosity == Verbosity.SUMMARY && e.startsWith("MSG LOST")) {
             return;
         }
 
         synchronized (recentEvents) {
-            // Komprimiere nur gleiche Linie nacheinander
             if (recentEvents.isEmpty() || lastEvent == null || !lastEvent.equals(e)) {
-                // commit vorherigen Counter
                 if (lastEventCount > 1) {
                     recentEvents.removeLast();
                     recentEvents.addLast(lastEvent + " × " + lastEventCount);
                 }
-                // neues Event
                 recentEvents.addLast(e);
                 lastEvent = e;
                 lastEventCount = 1;
-                // begrenzen
                 while (recentEvents.size() > recentCapacity) recentEvents.removeFirst();
             } else {
-                // gleiches Event wie zuvor – live zusammenfassen
                 lastEventCount++;
                 recentEvents.removeLast();
                 recentEvents.addLast(lastEvent + " × " + lastEventCount);
@@ -296,7 +283,6 @@ public class SimulationMonitor {
         synchronized (rawEvents) {
             rawEvents.add(line);
             if (rawEvents.size() > rawMax) {
-                // einfache Begrenzung (entferne die ältesten 10%)
                 int cut = Math.max(1, rawMax / 10);
                 for (int i = 0; i < cut; i++) rawEvents.remove(0);
             }
@@ -304,4 +290,70 @@ public class SimulationMonitor {
     }
 
     public int getCurrentMasterId() { return currentMasterId; }
+
+    /* =========================================================
+       === NEW: Distributed monitor entrypoint (used by MonitorMain)
+       === payload format: "TYPE|k=v|k=v|..."
+       ========================================================= */
+    public void onExternalEvent(int senderId, String payload) {
+        // örnek: "NODE_START|time=123.0|drift=0.97"
+        //        "MASTER_ELECTED|id=5"
+        //        "SYNC_END|master=5|E=-1.2|gamma=0.02|inliers=1,2,5"
+        try {
+            String[] parts = payload.split("\\|");
+            String type = parts[0].trim();
+
+            Map<String, String> kv = new HashMap<>();
+            for (int i = 1; i < parts.length; i++) {
+                String[] p = parts[i].split("=", 2);
+                if (p.length == 2) kv.put(p[0].trim(), p[1].trim());
+            }
+
+            switch (type) {
+                case "NODE_START" -> {
+                    double t = parseDouble(kv.get("time"), 0.0);
+                    double d = parseDouble(kv.get("drift"), 1.0);
+                    onNodeStart(senderId, t, d);
+                }
+                case "NODE_STOP" -> onNodeStop(senderId, false);
+                case "MASTER_ELECTED" -> onMasterElected((int) parseDouble(kv.get("id"), senderId));
+                case "ELECTION_START" -> onElectionStart(senderId);
+                case "COORDINATOR_ANNOUNCE" -> onCoordinatorAnnounce(senderId);
+                case "SYNC_START" -> onSyncStart(senderId);
+                case "SYNC_END" -> {
+                    int master = (int) parseDouble(kv.get("master"), senderId);
+                    double E = parseDouble(kv.get("E"), 0.0);
+                    double gamma = parseDouble(kv.get("gamma"), 0.0);
+                    Set<Integer> inliers = parseInliers(kv.get("inliers"));
+                    onSyncEnd(master, E, gamma, inliers);
+                }
+                case "TIME" -> {
+                    double t = parseDouble(kv.get("t"), 0.0);
+                    updateNodeTime(senderId, t);
+                }
+                default -> {
+                    // bilinmeyen event: en azından dashboard’a düşsün
+                    addEvent("External: N" + senderId + " -> " + payload, true);
+                }
+            }
+        } catch (Exception e) {
+            addEvent("External parse error from N" + senderId + ": " + payload, true);
+        }
+    }
+
+    private static double parseDouble(String s, double def) {
+        if (s == null) return def;
+        try { return Double.parseDouble(s); } catch (Exception e) { return def; }
+    }
+
+    private static Set<Integer> parseInliers(String s) {
+        Set<Integer> set = new HashSet<>();
+        if (s == null || s.isBlank()) return set;
+        // "1,2,5" formatı
+        String[] parts = s.split(",");
+        for (String p : parts) {
+            try { set.add(Integer.parseInt(p.trim())); } catch (Exception ignored) {}
+        }
+        return set;
+    }
 }
