@@ -271,3 +271,19 @@ Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B
         return a;
     }
 }
+
+/*
+Interpretation von: „Sync: E=-25807,803755, γ=0,046929, inliers=[3] (M=5)“.
+Hier geht es allgemein um das zu bestimmen ob ein Offset zu groß ist, also ob die Uhr eine faulty uhr ist Figure 1 vom berkely algo. Paper
+Also inliers = 3, aka nur 3 uhren sind noch innerhalb des bounds und keine faulty uhr.  Die restlichen Uhren sind Faulty -also in dme Fall 2 Stück.
+E =-25807,803755 -->Der Durchschnitt den uhren hinter der master uhr liegen, also das was bei figure 2. bei berkely paper ausgerechent wird.
+Aber im folgendne Genauer:
+
+•	M=5: Master der Runde ist Node 5.
+•	E=-25807.803755 s: Der gemittelte Offset der als “konsistent” erkannten Uhren liegt ~25 808 Sekunden hinter der Master Uhr. Der Master wendet E an (Join: harter Step, später Slew) und schickt daraus abgeleitete Korrekturen an die Slaves.
+•	γ=0.046929 s: Toleranzfenster, in dem Offsets als “nah genug” gelten (~47 ms).
+•	inliers=[3]: Nur Node 3 lag innerhalb des Fensters γ; alle anderen (inkl. Master Offset 0) wurden in dieser Runde als Ausreißer betrachtet.
+
+
+ */
+
