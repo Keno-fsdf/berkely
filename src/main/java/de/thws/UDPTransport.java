@@ -15,7 +15,7 @@ public class UDPTransport {
     private final Random random = new Random();
     private volatile boolean closed = false;
 
-    private final MonitorSink monitor;  // MonitorSink statt SimulationMonitor
+    private final MonitorSink monitor;  // MonitorSink!
 
     public UDPTransport(int port, double successProbability, MonitorSink monitor) throws SocketException {
         this.successProbability = successProbability;
@@ -33,7 +33,6 @@ public class UDPTransport {
         if (closed) return;
         try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
              ObjectOutputStream oos = new ObjectOutputStream(bos)) {
-
             oos.writeObject(msg);
             oos.flush();
             byte[] data = bos.toByteArray();
@@ -48,11 +47,9 @@ public class UDPTransport {
             } else {
                 if (monitor != null) monitor.onMessageLost(msg);
                 if (PRINT_LOSS) {
-                    System.out.printf("Message LOST: %s %d->%d%n",
-                            msg.type(), msg.senderId(), target.id());
+                    System.out.printf("Message LOST: %s %d->%d%n", msg.type(), msg.senderId(), target.id());
                 }
             }
-
         } catch (IOException e) {
             if (!closed) e.printStackTrace();
         }
