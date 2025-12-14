@@ -11,7 +11,7 @@ public class Node {
     private final Clock clock;
     private final UDPTransport transport;
     private final NodeConfig cfg;
-    private final SimulationMonitor monitor;
+    private final MonitorSink monitor;
 
     private final AtomicBoolean running = new AtomicBoolean(true);
     private volatile boolean alive = true;
@@ -64,7 +64,7 @@ public class Node {
         this(info, peers, drift, initialTime, transport, cfg, null);
     }
 
-    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg, SimulationMonitor monitor) {
+    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg, MonitorSink monitor) {
         this.info = info;
         this.peers = peers;
         this.clock = new Clock(initialTime, drift);
@@ -73,7 +73,7 @@ public class Node {
         this.monitor = monitor;
     }
 
-    // Start: KEIN onNodeStart hier (Demo meldet Start einheitlich)
+    // Start
     public void start() {
         clockThread = new Thread(this::runClock, "ClockThread-" + info.id()); clockThread.setDaemon(true); clockThread.start();
         listenerThread = new Thread(this::runListener, "ListenerThread-" + info.id()); listenerThread.setDaemon(true); listenerThread.start();
@@ -141,7 +141,6 @@ public class Node {
         log("PERMANENTER Fail-Stop – Node stoppt.");
         stop(true);
     }
-
 // Threads
 
     private void runClock() {
@@ -312,7 +311,6 @@ public class Node {
         for (int id : ids) { Double v = map.get(id); if (v != null) { s += v; n++; } }
         return n == 0 ? 0.0 : s / n;
     }
-
 // Nachrichtenverarbeitung
 
     private void handleMessage(Message msg) {
@@ -322,8 +320,8 @@ public class Node {
             case TIME_ADJUST -> onTimeAdjust(msg);
             case HEARTBEAT -> onHeartbeat(msg);
             case ELECTION -> onElection(msg);
-            case ELECTION_OK -> onElectionOk(msg);
             case COORDINATOR_ELECTED -> onCoordinator(msg);
+            case ELECTION_OK -> onElectionOk(msg);
             default -> log("Unbekannte Nachricht: " + msg);
         }
     }
@@ -406,7 +404,6 @@ public class Node {
             if (src != null) send(Message.electionOk(info.id(), src.id()), src);
             long nowMs = System.currentTimeMillis();
             if (!electionInProgress && nowMs >= electionCooldownUntilMs) startElection();
-            return;
         }
     }
 

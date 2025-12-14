@@ -1,4 +1,5 @@
-package de.thws;
+
+        package de.thws;
 
 import java.io.*;
 import java.net.*;
@@ -19,9 +20,9 @@ public class UDPTransport {
     private final Random random = new Random();
     private volatile boolean closed = false;
 
-    private final SimulationMonitor monitor;
+    private final MonitorSink monitor;
 
-    public UDPTransport(int port, double successProbability, SimulationMonitor monitor) throws SocketException {
+    public UDPTransport(int port, double successProbability, MonitorSink monitor) throws SocketException {
         this.successProbability = successProbability;
         this.socket = new DatagramSocket(port);
         this.socket.setSoTimeout(200);
