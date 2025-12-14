@@ -1,5 +1,4 @@
-
-        package de.thws;
+package de.thws;
 
 import java.io.*;
 import java.net.*;
@@ -8,19 +7,15 @@ import java.util.Random;
 
 public class UDPTransport {
 
-    // Flag: steuert, ob verlorene Nachrichten in der Konsole gedruckt werden
     private static volatile boolean PRINT_LOSS = false;
-
-    public static void setPrintLoss(boolean enabled) {
-        PRINT_LOSS = enabled;
-    }
+    public static void setPrintLoss(boolean enabled) { PRINT_LOSS = enabled; }
 
     private DatagramSocket socket;
     private final double successProbability;
     private final Random random = new Random();
     private volatile boolean closed = false;
 
-    private final MonitorSink monitor;
+    private final MonitorSink monitor;  // MonitorSink statt SimulationMonitor
 
     public UDPTransport(int port, double successProbability, MonitorSink monitor) throws SocketException {
         this.successProbability = successProbability;
@@ -51,7 +46,6 @@ public class UDPTransport {
                 socket.send(packet);
                 if (monitor != null) monitor.onMessageDelivered(msg);
             } else {
-                // Monitor-Zählung und optionaler Console-Print
                 if (monitor != null) monitor.onMessageLost(msg);
                 if (PRINT_LOSS) {
                     System.out.printf("Message LOST: %s %d->%d%n",
@@ -74,10 +68,8 @@ public class UDPTransport {
             byte[] buf = new byte[4096];
             DatagramPacket packet = new DatagramPacket(buf, buf.length);
             socket.receive(packet);
-
             try (ByteArrayInputStream bis = new ByteArrayInputStream(packet.getData(), 0, packet.getLength());
                  ObjectInputStream ois = new ObjectInputStream(bis)) {
-
                 return (Message) ois.readObject();
             }
         } catch (SocketTimeoutException e) {

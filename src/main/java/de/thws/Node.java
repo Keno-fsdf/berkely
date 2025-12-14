@@ -11,7 +11,7 @@ public class Node {
     private final Clock clock;
     private final UDPTransport transport;
     private final NodeConfig cfg;
-    private final MonitorSink monitor;
+    private final MonitorSink monitor;   // MonitorSink statt SimulationMonitor
 
     private final AtomicBoolean running = new AtomicBoolean(true);
     private volatile boolean alive = true;
@@ -46,16 +46,13 @@ public class Node {
         OffsetSample(double offset, double rtt) { this.offset = offset; this.rtt = rtt; }
     }
 
-    // De-dup Guards für Monitor
     private volatile boolean inFailStop = false;
     private volatile int lastNotifiedMasterId = -1;
 
-    // TEMPO-Join-Handling: erster großer Offset hart setzen, danach nur slewen
     private volatile boolean firstAdjustOnThisNode = true;
-    private static final double JOIN_HARD_SET_THRESHOLD_SECONDS = 1.0; // >1s → einmalig hart setzen
-    private static final double P_BOUND_DEFAULT = 1e-4; // 100 ppm Bound (Paper-Niveau)
+    private static final double JOIN_HARD_SET_THRESHOLD_SECONDS = 1.0;
+    private static final double P_BOUND_DEFAULT = 1e-4;
 
-    // Konstruktoren (mit/ohne Monitor/Config)
     public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport) {
         this(info, peers, drift, initialTime, transport, NodeConfig.defaults(), null);
     }
@@ -73,18 +70,15 @@ public class Node {
         this.monitor = monitor;
     }
 
-    // Start
     public void start() {
         clockThread = new Thread(this::runClock, "ClockThread-" + info.id()); clockThread.setDaemon(true); clockThread.start();
         listenerThread = new Thread(this::runListener, "ListenerThread-" + info.id()); listenerThread.setDaemon(true); listenerThread.start();
         berkeleyThread = new Thread(this::runBerkeley, "BerkeleyThread-" + info.id()); berkeleyThread.setDaemon(true); berkeleyThread.start();
         heartbeatThread = new Thread(this::runHeartbeat, "HeartbeatThread-" + info.id()); heartbeatThread.setDaemon(true); heartbeatThread.start();
         monitorThread = new Thread(this::runMonitor, "MonitorThread-" + info.id()); monitorThread.setDaemon(true); monitorThread.start();
-
         log("Node gestartet.");
     }
 
-    // Stop-Overloads (permanent/geregelt)
     public void stop() { stop(false); }
 
     public void stop(boolean permanent) {
@@ -109,7 +103,6 @@ public class Node {
 
     public boolean isAlive() { return alive; }
 
-    // Temporärer Fail-Stop
     public void failTemporarily(long downtimeMs) {
         if (!running.get() || !alive) return;
         if (!inFailStop) {
@@ -136,12 +129,10 @@ public class Node {
         }, "FailReturn-" + info.id()).start();
     }
 
-    // Permanenter Fail-Stop
     public void failPermanently() {
         log("PERMANENTER Fail-Stop – Node stoppt.");
         stop(true);
     }
-// Threads
 
     private void runClock() {
         try {
@@ -206,13 +197,11 @@ public class Node {
         }
     }
 
-    // Berkeley-Runde (TEMPO-orientiert)
     private void runBerkeleySyncRound() {
         if (!running.get() || !alive) return;
         if (monitor != null) monitor.onSyncStart(info.id());
         log("Starte Berkeley-Sync-Runde...");
 
-        // 1) Probing
         synchronized (lock) { pendingT1.clear(); samplesByPeer.clear(); }
         for (NodeInfo peer : peers) {
             for (int i = 0; i < cfg.probes; i++) {
@@ -227,7 +216,6 @@ public class Node {
         try { Thread.sleep(100); } catch (InterruptedException ignored) { return; }
         if (!running.get() || !alive) return;
 
-        // 2) Beste Offsets je Peer (min-RTT innerhalb TM), min RTT sammeln
         Map<Integer, Double> bestOffsetByPeer = new HashMap<>();
         Map<Integer, Double> minRttByPeer     = new HashMap<>();
         synchronized (lock) {
@@ -237,13 +225,9 @@ public class Node {
                 double minRtt = Double.POSITIVE_INFINITY;
                 for (OffsetSample s : list) {
                     if (s.rtt < minRtt) minRtt = s.rtt;
-                    if (s.rtt <= cfg.tmBoundSeconds && (best == null || s.rtt < best.rtt)) {
-                        best = s;
-                    }
+                    if (s.rtt <= cfg.tmBoundSeconds && (best == null || s.rtt < best.rtt)) best = s;
                 }
-                if (best == null) {
-                    for (OffsetSample s : list) if (best == null || s.rtt < best.rtt) best = s;
-                }
+                if (best == null) for (OffsetSample s : list) if (best == null || s.rtt < best.rtt) best = s;
                 if (best != null) {
                     bestOffsetByPeer.put(peer.id(), best.offset);
                     minRttByPeer.put(peer.id(), minRtt);
@@ -253,33 +237,28 @@ public class Node {
             }
         }
 
-        // 3) Offsets inkl. Master (0.0)
         Map<Integer, Double> offsetsInclMaster = new HashMap<>(bestOffsetByPeer);
         offsetsInclMaster.put(info.id(), 0.0);
 
-        // 4) Paper-basierte Bounds: ε und γ
         double minRttGlobal = minRttByPeer.values().stream().mapToDouble(v -> v).min().orElse(cfg.tmBoundSeconds);
         double epsilon = Math.max(0.0, (cfg.tmBoundSeconds - minRttGlobal) / 2.0);
         double Tsec = cfg.syncIntervalMs / 1000.0;
-        double pEst = Math.max(P_BOUND_DEFAULT, Math.abs(clock.getDrift() - 1.0)); // einfacher Bound
+        double pEst = Math.max(P_BOUND_DEFAULT, Math.abs(clock.getDrift() - 1.0));
         double gammaUse = Math.max(cfg.gammaBaseSeconds, 4.0 * epsilon + 2.0 * pEst * Tsec);
 
-        // 5) Inlier-Cluster innerhalb γ und fault-toleranter Mittelwert
         Set<Integer> inliers = largestClusterWithinGamma(offsetsInclMaster, gammaUse);
         double E = average(inliers, offsetsInclMaster);
         firstSync = false;
 
-        // 6) Master-Korrektur: Join-Fast-Path (hart) oder Slewing
         if (firstAdjustOnThisNode && Math.abs(E) > JOIN_HARD_SET_THRESHOLD_SECONDS) {
-            clock.setTime(clock.getTime() + E); // einmalig hart setzen beim Join
+            clock.setTime(clock.getTime() + E);
             log(String.format("Clock set %+.6f s (Master, Join-Fast-Path)", E));
         } else {
-            clock.adjust(E); // danach nur noch slewen
+            clock.adjust(E);
             log(String.format("Clock adjust %+.6f s (Master, slewing)", E));
         }
         firstAdjustOnThisNode = false;
 
-        // 7) Korrekturen an Slaves (auch „faulty“)
         for (NodeInfo peer : peers) {
             Double eak = bestOffsetByPeer.get(peer.id());
             if (eak == null) continue;
@@ -311,7 +290,6 @@ public class Node {
         for (int id : ids) { Double v = map.get(id); if (v != null) { s += v; n++; } }
         return n == 0 ? 0.0 : s / n;
     }
-// Nachrichtenverarbeitung
 
     private void handleMessage(Message msg) {
         switch (msg.type()) {
@@ -320,8 +298,8 @@ public class Node {
             case TIME_ADJUST -> onTimeAdjust(msg);
             case HEARTBEAT -> onHeartbeat(msg);
             case ELECTION -> onElection(msg);
-            case COORDINATOR_ELECTED -> onCoordinator(msg);
             case ELECTION_OK -> onElectionOk(msg);
+            case COORDINATOR_ELECTED -> onCoordinator(msg);
             default -> log("Unbekannte Nachricht: " + msg);
         }
     }
@@ -349,13 +327,12 @@ public class Node {
 
     private void onTimeAdjust(Message msg) {
         if (!alive || isMaster) return;
-
         double off = msg.offset();
         if (firstAdjustOnThisNode && Math.abs(off) > JOIN_HARD_SET_THRESHOLD_SECONDS) {
-            clock.setTime(clock.getTime() + off); // einmalig hart setzen beim Join
+            clock.setTime(clock.getTime() + off);
             log(String.format("Clock set %+.6f s (vom Master, Join-Fast-Path)", off));
         } else {
-            clock.adjust(off); // danach nur noch slewen
+            clock.adjust(off);
             log(String.format("Clock adjust %+.6f s (vom Master, slewing)", off));
         }
         firstAdjustOnThisNode = false;
@@ -382,7 +359,7 @@ public class Node {
             lastHeartbeatMs = now;
             electionCooldownUntilMs = now + cfg.graceAfterCoordMs;
             isMaster = false;
-            notifyMasterIfChanged(currentMasterId, true); // Demotion
+            notifyMasterIfChanged(currentMasterId, true);
             log("Heartbeat höherer ID akzeptiert, neuer vermuteter Master: " + currentMasterId);
         }
     }
@@ -404,6 +381,7 @@ public class Node {
             if (src != null) send(Message.electionOk(info.id(), src.id()), src);
             long nowMs = System.currentTimeMillis();
             if (!electionInProgress && nowMs >= electionCooldownUntilMs) startElection();
+            return;
         }
     }
 
@@ -500,7 +478,6 @@ public class Node {
         for (NodeInfo p : peers) send(Message.coordinatorElected(info.id(), p.id()), p);
     }
 
-    // Notify helper (dedupe)
     private void notifyMasterIfChanged(int newMasterId, boolean demotion) {
         if (newMasterId == lastNotifiedMasterId) return;
         lastNotifiedMasterId = newMasterId;
