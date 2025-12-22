@@ -1,5 +1,6 @@
 package de.thws;
 
+import java.net.SocketException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -12,6 +13,7 @@ public class Node {
     private final UDPTransport transport;
     private final NodeConfig cfg;
     private final SimulationMonitor monitor;
+    private final UDPTransport monitorTransport;
 
     private final AtomicBoolean running = new AtomicBoolean(true);
     private volatile boolean alive = true;
@@ -56,21 +58,26 @@ public class Node {
     private static final double P_BOUND_DEFAULT = 1e-4; // 100 ppm Bound (Paper-Niveau)
 
     // Konstruktoren (mit/ohne Monitor/Config)
-    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport) {
+    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport) throws SocketException {
         this(info, peers, drift, initialTime, transport, NodeConfig.defaults(), null);
     }
 
-    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg) {
+    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg) throws SocketException {
         this(info, peers, drift, initialTime, transport, cfg, null);
     }
 
-    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg, SimulationMonitor monitor) {
+    public Node(NodeInfo info, List<NodeInfo> peers, double drift, double initialTime, UDPTransport transport, NodeConfig cfg, SimulationMonitor monitor) throws SocketException {
         this.info = info;
         this.peers = peers;
         this.clock = new Clock(initialTime, drift);
         this.transport = transport;
         this.cfg = cfg;
         this.monitor = monitor;
+        this.monitorTransport = new UDPTransport(
+                0,        // ephemeral port (sadece send)
+                1.0,
+                null
+        );
     }
 
     // Start: KEIN onNodeStart hier (Demo meldet Start einheitlich)
@@ -80,7 +87,11 @@ public class Node {
         berkeleyThread = new Thread(this::runBerkeley, "BerkeleyThread-" + info.id()); berkeleyThread.setDaemon(true); berkeleyThread.start();
         heartbeatThread = new Thread(this::runHeartbeat, "HeartbeatThread-" + info.id()); heartbeatThread.setDaemon(true); heartbeatThread.start();
         monitorThread = new Thread(this::runMonitor, "MonitorThread-" + info.id()); monitorThread.setDaemon(true); monitorThread.start();
-
+        sendMonitorEvent("NODE_START|time=" + clock.getTime() +
+                "|drift=" + clock.getDrift() +
+                "|peers=" + peers.size() +
+                "|host=" + info.host() +
+                "|port=" + info.port());
         log("Node gestartet.");
     }
 
@@ -104,6 +115,7 @@ public class Node {
         joinSilently(monitorThread, 1000);
 
         if (monitor != null) monitor.onNodeStop(info.id(), permanent);
+        sendMonitorEvent("NODE_STOP|permanent=" + permanent);
         log("Node gestoppt.");
     }
 
@@ -116,6 +128,7 @@ public class Node {
             inFailStop = true;
             if (monitor != null) monitor.onFailStopStart(info.id(), downtimeMs);
         }
+        sendMonitorEvent("FAIL_START|mode=temp|ms=" + downtimeMs);
         log("Fail-Stop (temporär) für " + downtimeMs + "ms");
 
         isMaster = false;
@@ -139,6 +152,7 @@ public class Node {
     // Permanenter Fail-Stop
     public void failPermanently() {
         log("PERMANENTER Fail-Stop – Node stoppt.");
+        sendMonitorEvent("FAIL_START|mode=perm");
         stop(true);
     }
 
@@ -198,6 +212,7 @@ public class Node {
                     else missedHbCount = 0;
 
                     if (!electionInProgress && nowMs >= electionCooldownUntilMs && missedHbCount >= cfg.missedHbThreshold) {
+                        sendMonitorEvent("ELECTION_START|reason=missed_hb|missed=" + missedHbCount);
                         startElection();
                         missedHbCount = 0;
                     }
@@ -212,6 +227,8 @@ public class Node {
         if (!running.get() || !alive) return;
         if (monitor != null) monitor.onSyncStart(info.id());
         log("Starte Berkeley-Sync-Runde...");
+        sendMonitorEvent("SYNC_START|master=" + info.id());
+
 
         // 1) Probing
         synchronized (lock) { pendingT1.clear(); samplesByPeer.clear(); }
@@ -250,6 +267,7 @@ public class Node {
                     minRttByPeer.put(peer.id(), minRtt);
                 } else {
                     log("Warnung: keine gültigen Samples von Peer " + peer.id());
+                    sendMonitorEvent("SYNC_PEER_MISSING|peer=" + peer.id());
                 }
             }
         }
@@ -373,6 +391,7 @@ public class Node {
             electionCooldownUntilMs = now + cfg.graceAfterCoordMs;
             notifyMasterIfChanged(currentMasterId, false);
             log("Erster Heartbeat: vermuteter Master ist " + currentMasterId);
+            sendMonitorEvent("COORDINATOR_ADOPT|master=" + currentMasterId + "|via=first_hb");
             return;
         }
 
@@ -386,6 +405,8 @@ public class Node {
             isMaster = false;
             notifyMasterIfChanged(currentMasterId, true); // Demotion
             log("Heartbeat höherer ID akzeptiert, neuer vermuteter Master: " + currentMasterId);
+            sendMonitorEvent("DEMOTED|newMaster=" + currentMasterId + "|via=higher_hb");
+
         }
     }
 
@@ -410,13 +431,18 @@ public class Node {
         }
     }
 
-    private void onElectionOk(Message msg) { gotOkFromHigher = true; }
+    private void onElectionOk(Message msg) {
+        gotOkFromHigher = true;
+        sendMonitorEvent("ELECTION_OK_RX|from=" + msg.senderId());
+    }
 
     private void onCoordinator(Message msg) {
         if (!alive) return;
 
         if (msg.senderId() < info.id()) {
-            if (!isMaster && !electionInProgress) startElection();
+            if (!isMaster && !electionInProgress) {
+                startElection();
+            }
             return;
         }
 
@@ -430,6 +456,7 @@ public class Node {
 
         notifyMasterIfChanged(currentMasterId, false);
         log("Neuer Master ist " + currentMasterId);
+        sendMonitorEvent("COORDINATOR_ADOPT|master=" + currentMasterId);
     }
 
     private void startElection() {
@@ -495,11 +522,15 @@ public class Node {
             try { Thread.sleep(cfg.coordinatorAnnounceIntervalMs); } catch (InterruptedException ignored) {}
         }
         notifyMasterIfChanged(currentMasterId, false);
+        sendMonitorEvent("MASTER_ELECTED|id=" + info.id() + "|via=self_promo");
         log("Ich bin der neue Master.");
     }
 
     private void announceCoordinator() {
-        if (monitor != null) monitor.onCoordinatorAnnounce(info.id());
+        if (monitor != null) {
+            monitor.onCoordinatorAnnounce(info.id());
+            sendMonitorEvent("COORDINATOR_ANNOUNCE");
+        }
         for (NodeInfo p : peers) send(Message.coordinatorElected(info.id(), p.id()), p);
     }
 
@@ -534,4 +565,13 @@ public class Node {
     public Clock getClock() { return clock; }
     public List<NodeInfo> getPeers() { return peers; }
     public boolean getIsMaster() { return isMaster; }
+
+    private void sendMonitorEvent(String payload) {
+        if (monitorTransport == null) return;
+
+        monitorTransport.send(
+                Message.monitorEvent(info.id(), payload),
+                NodeMain.MONITOR
+        );
+    }
 }

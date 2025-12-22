@@ -8,7 +8,6 @@ public class MonitorMain {
 
     public static void main(String[] args) throws Exception {
 
-        // Sistem topolojisi (ID listesi)
         SimulationMonitor monitor = new SimulationMonitor(
                 List.of(1, 2, 3, 4, 5),
                 SimulationMonitor.Verbosity.SUMMARY,
@@ -24,10 +23,12 @@ public class MonitorMain {
             Message msg = transport.receive();
             if (msg == null) continue;
 
+            System.out.println("MONITOR RX: " + msg);
+
             if (msg.type() == Message.Type.MONITOR_EVENT) {
-                // msg.payload() record'da var (sen onu ekledin)
                 monitor.onExternalEvent(msg.senderId(), msg.payload());
             }
         }
+
     }
 }

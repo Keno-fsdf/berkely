@@ -11,6 +11,10 @@ public class NodeMain {
      * Example:
      *   java NodeMain 3
      */
+
+    static final NodeInfo MONITOR =
+            new NodeInfo(-1, "192.168.0.106", 6000);
+
     public static void main(String[] args) throws Exception {
 
         if (args.length != 1) {
@@ -20,11 +24,11 @@ public class NodeMain {
 
         int nodeId = Integer.parseInt(args[0]);
         List<NodeInfo> allNodes = List.of(
-                new NodeInfo(1, "192.168.1.10", 5001),
-                new NodeInfo(2, "192.168.1.10", 5002),
-                new NodeInfo(3, "192.168.1.20", 5001),
-                new NodeInfo(4, "192.168.1.20", 5002),
-                new NodeInfo(5, "192.168.1.20", 5003)
+                new NodeInfo(1, "192.168.0.106", 5001),
+                new NodeInfo(2, "192.168.0.106", 5002),
+                new NodeInfo(3, "192.168.0.106", 5003),
+                new NodeInfo(4, "192.168.0.106", 5004),
+                new NodeInfo(5, "192.168.0.106", 5005)
         );
 
         NodeInfo self = allNodes.stream()
