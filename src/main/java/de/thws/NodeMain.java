@@ -96,8 +96,8 @@ public class NodeMain {
                 initialTime,
                 transport,
                 NodeConfig.defaults(),
-                null,        // local SimulationMonitor YOK
-                MONITOR      // ✅ DOĞRU: NodeInfo
+                null,
+                MONITOR
         );
 
 

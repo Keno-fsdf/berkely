@@ -104,7 +104,7 @@ public class SimulationMonitor implements MonitorSink {
 
                 case "SYNC_START" -> {
                     int m = Integer.parseInt(kv.getOrDefault("master", String.valueOf(senderId)));
-                    setMaster(m, "SYNC_START");   // master kimse onu sabitle
+                    setMaster(m, "SYNC_START");
                     onSyncStart(m);
                 }
 
@@ -113,7 +113,6 @@ public class SimulationMonitor implements MonitorSink {
                     double E = parseDouble(kv.get("E"), 0.0);
                     double g = parseDouble(kv.getOrDefault("gamma", "0.0"), 0.0);
                     Set<Integer> in = parseIdSet(kv.get("inliers"));
-                    // SYNC_END de master bilgisi içeriyor, sync yapan masterı güncellemek mantıklı
                     setMaster(m, "SYNC_END");
                     onSyncEnd(m, E, g, in);
                 }
@@ -126,7 +125,6 @@ public class SimulationMonitor implements MonitorSink {
                     onSyncSkip(senderId, reason, inliers, offsets, g);
                 }
 
-                // master DEĞİŞTİRMEZ – sadece log
                 case "MASTER_SLEW" ->
                         addEvent("MASTER_SLEW von N" + senderId + " E=" + fmt(parseDouble(kv.get("E"), 0.0)));
 
@@ -139,8 +137,7 @@ public class SimulationMonitor implements MonitorSink {
                 case "DRIFT" ->
                         updateNodeDrift(senderId, parseDouble(kv.get("d"), 1.0));
 
-                // Bunlar master değiştirir mi? Tek başına hayır.
-                // Ama DEMOTED payload'ında newMaster varsa, monitor masterı güncelleyebilir.
+
                 case "DEMOTED" -> {
                     addEvent("Node " + senderId + " wurde degradiert");
                     String nm = kv.get("newMaster");
