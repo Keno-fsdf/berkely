@@ -6,14 +6,20 @@ public class NodeMain {
 
     /**
      * Usage:
-     *   java NodeMain <nodeId>
+     *   java de.thws.NodeMain <nodeId>
      *
-     * Example:
-     *   java NodeMain 3
+     * Beispiel:
+     *   java de.thws.NodeMain 3
      */
 
+    // Adresse des externen Monitors (separater Prozess)
+    // MonitorMain läuft z. B. mit:
+    //   java de.thws.MonitorMain
+    static final String MONITOR_HOST = "192.168.178.22";
+    static final int MONITOR_PORT = 6000;
     static final NodeInfo MONITOR =
-            new NodeInfo(-1, "192.168.0.106", 6000);
+            new NodeInfo(-1, "192.168.178.22", 6000);
+
 
     public static void main(String[] args) throws Exception {
 
@@ -23,34 +29,66 @@ public class NodeMain {
         }
 
         int nodeId = Integer.parseInt(args[0]);
+
+        // -------------------------------
+        // Definition aller Nodes im System
+        // -------------------------------
         List<NodeInfo> allNodes = List.of(
-                new NodeInfo(1, "192.168.0.106", 5001),
-                new NodeInfo(2, "192.168.0.106", 5002),
-                new NodeInfo(3, "192.168.0.106", 5003),
-                new NodeInfo(4, "192.168.0.106", 5004),
-                new NodeInfo(5, "192.168.0.106", 5005)
+                new NodeInfo(1, "192.168.178.22", 5001),
+                new NodeInfo(2, "192.168.178.22", 5002),
+                new NodeInfo(3, "192.168.178.22", 5003),
+                new NodeInfo(4, "192.168.178.22", 5004),
+                new NodeInfo(5, "192.168.178.22", 5005)
         );
 
+        // Eigener Node
         NodeInfo self = allNodes.stream()
                 .filter(n -> n.id() == nodeId)
                 .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("Unknown nodeId " + nodeId));
+                .orElseThrow(() ->
+                        new IllegalArgumentException("Unknown nodeId " + nodeId));
 
+        // Alle anderen Nodes = Peers
         List<NodeInfo> peers = allNodes.stream()
                 .filter(n -> n.id() != nodeId)
                 .toList();
 
-        // === CLOCK PARAMS ===
-        double drift = 0.95 + Math.random() * 0.15;   // drift ∈ [0.95, 1.10]
-        double initialTime = Math.random() * 86400.0;
+        // -------------------------------
+        // Uhrenparameter (lokale Uhr)
+        // -------------------------------
+        // Drift ∈ [0.95, 1.10]
+        double drift = 0.95 + Math.random() * 0.15;
 
-        // === TRANSPORT ===
+        // Basiszeit (Sekunden seit Epoch)
+        double baseTime = System.currentTimeMillis() / 1000.0;
+
+        // Zufälliger Offset ±250 ms
+        double jitter = (Math.random() - 0.5) * 0.5;
+
+        double initialTime = baseTime + jitter;
+
+        // -------------------------------
+        // Transport: Node ↔ Node (UDP)
+        // -------------------------------
+        // Kein SimulationMonitor hier!
+        // Monitoring läuft extern.
         UDPTransport transport = new UDPTransport(
                 self.port(),
-                1.0,        // loss = 0.0 (demo sırasında kaos istemiyoruz)
-                null        // SimulationMonitor yok (process başına sade)
+                1.0,     // successProbability = 1.0 → kein Packet Loss
+                null     // kein lokaler Monitor im Node-Prozess
         );
 
+        // -------------------------------
+        // Remote Monitor (UDP → MonitorMain)
+        // -------------------------------
+        // Dieser Sink schickt strukturierte Events
+        // an den separaten Monitor-Prozess.
+        MonitorSink remoteMonitor =
+                new RemoteMonitorClient(MONITOR_HOST, MONITOR_PORT);
+
+        // -------------------------------
+        // Node erzeugen
+        // -------------------------------
         Node node = new Node(
                 self,
                 peers,
@@ -58,18 +96,27 @@ public class NodeMain {
                 initialTime,
                 transport,
                 NodeConfig.defaults(),
-                null
+                null,        // local SimulationMonitor YOK
+                MONITOR      // ✅ DOĞRU: NodeInfo
         );
 
+
+        // -------------------------------
+        // Node starten
+        // -------------------------------
         node.start();
 
         System.out.printf(
                 "Node %d STARTED @ %s:%d | drift=%.4f | t0=%.2f%n",
-                nodeId, self.host(), self.port(), drift, initialTime
+                nodeId,
+                self.host(),
+                self.port(),
+                drift,
+                initialTime
         );
 
-        // JVM açık kalsın → CTRL+C = fail-stop
+        // JVM am Leben halten
+        // CTRL+C entspricht Fail-Stop
         Thread.currentThread().join();
     }
 }
-

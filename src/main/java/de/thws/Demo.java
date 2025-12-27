@@ -66,15 +66,7 @@ die Downtime (dt).
 Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B. currentlyDown.size() < maxConcurrentFails, n.isAlive(), Sets werden durch Scheduler nach dt+100 ms wieder freigegeben). Wegen Thread‑/Scheduling‑Jitter kann sich dadurch im Einzelfall die Eligibility leicht verschieben – dann wirkt sich die gleiche Zufallsfolge etwas anders aus.
 
          */
-
-
-
         int basePort = 5001;
-
-
-
-
-
 
 
         // gezielter Master‑Kill (optional) für Vorstellen nützlich. Also so kann man leichter das vorzeigen mit dem master ausfall.
@@ -82,11 +74,6 @@ Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B
         long killMasterAtMs = 2000; // nach wie vielen ms (z. B. 2000)
         boolean killMasterPermanent = false; // true = permanent, false = temporär
         long killMasterDownMs = 3000; // Dauer (ms) für temporären Fail‑Stop
-
-
-
-
-
 
 
     }
@@ -108,11 +95,11 @@ Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B
 
         SimulationMonitor monitor = new SimulationMonitor(
                 infos.stream().map(NodeInfo::id).toList(),
-                SimulationMonitor.Verbosity.SUMMARY, // kompaktes Dashboard
-                false,                               // showLossInDashboard = nein (Loss nur in Δ/total)
-                false,                               // renderMasterChangeDashboard = nein
-                15                                   // recentCapacity
+                SimulationMonitor.Verbosity.SUMMARY,
+                15
         );
+
+
         monitor.onSimulationStart(a.nodes, a.loss, a.randomFail, a.failRatePerNodePerSec, a.permanentDeathProb, a.durationMs);
 
         // 2) Transports (mit Monitor für Send/Loss-Zähler)
@@ -130,7 +117,7 @@ Aber: Diese Entscheidungen greifen nur, wenn die Gate‑Bedingungen passen (z. B
             double drift = a.driftMin + rnd.nextDouble() * (a.driftMax - a.driftMin);
 
             UDPTransport t = transports.get(i);
-            Node n = new Node(self, peers, drift, initTime, t, NodeConfig.defaults(), monitor);
+            Node n = new Node(self, peers, drift, initTime, t, NodeConfig.defaults(), null);
             nodes.add(n);
 
             monitor.onNodeStart(self.id(), initTime, drift);

@@ -5,32 +5,23 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class SimulationMonitor {
+public class SimulationMonitor implements MonitorSink {
 
-    public enum Verbosity {
-        SUMMARY,  // Dashboard: kompakt (keine Einzel-MSG-LOST Events)
-        DETAIL,   // Dashboard: zeigt alle Events
-        DEBUG     // wie DETAIL; Platzhalter
-    }
+    public enum Verbosity { SUMMARY, DETAIL }
 
     public static class NodeState {
         public final int id;
         public volatile boolean alive = true;
-        public volatile boolean dead = false;
         public volatile boolean master = false;
         public volatile double time = 0.0;
         public volatile double drift = 1.0;
+
         public NodeState(int id) { this.id = id; }
     }
 
-    // Konfiguration
     private final Verbosity verbosity;
-    private final boolean showLossInDashboard;
-    private final boolean renderMasterChangeDashboard;
     private final int recentCapacity;
-    private final int rawMax;
 
-    // Zustände
     private final Map<Integer, NodeState> nodes = new ConcurrentHashMap<>();
     private final EnumMap<Message.Type, AtomicLong> sentTotal = new EnumMap<>(Message.Type.class);
     private final EnumMap<Message.Type, AtomicLong> lostTotal = new EnumMap<>(Message.Type.class);
@@ -38,35 +29,13 @@ public class SimulationMonitor {
     private final EnumMap<Message.Type, AtomicLong> lostDelta = new EnumMap<>(Message.Type.class);
 
     private final Deque<String> recentEvents = new ArrayDeque<>();
-    private final List<String> rawEvents = Collections.synchronizedList(new ArrayList<>());
 
-    private volatile int currentMasterId = -1;
-    private volatile String lastSyncSummary = "—";
+    // Master state
+    private volatile int currentMaster = -1;
+    private volatile String lastSync = "—";
     private volatile int syncRound = 0;
 
-    // Für Event-Komprimierung (nur Dashboard)
-    private String lastEvent = null;
-    private int lastEventCount = 0;
-
-    // Konstruktoren
-    public SimulationMonitor(Collection<Integer> nodeIds) {
-        this(nodeIds, Verbosity.SUMMARY, false, false, 15, 10_000);
-    }
-
-    public SimulationMonitor(Collection<Integer> nodeIds,
-                             Verbosity verbosity,
-                             boolean showLossInDashboard,
-                             boolean renderMasterChangeDashboard,
-                             int recentCapacity) {
-        this(nodeIds, verbosity, showLossInDashboard, renderMasterChangeDashboard, recentCapacity, 10_000);
-    }
-
-    public SimulationMonitor(Collection<Integer> nodeIds,
-                             Verbosity verbosity,
-                             boolean showLossInDashboard,
-                             boolean renderMasterChangeDashboard,
-                             int recentCapacity,
-                             int rawMax) {
+    public SimulationMonitor(Collection<Integer> nodeIds, Verbosity verbosity, int recentCapacity) {
         for (int id : nodeIds) nodes.put(id, new NodeState(id));
         for (Message.Type t : Message.Type.values()) {
             sentTotal.put(t, new AtomicLong());
@@ -75,230 +44,47 @@ public class SimulationMonitor {
             lostDelta.put(t, new AtomicLong());
         }
         this.verbosity = verbosity;
-        this.showLossInDashboard = showLossInDashboard;
-        this.renderMasterChangeDashboard = renderMasterChangeDashboard;
         this.recentCapacity = recentCapacity;
-        this.rawMax = rawMax;
     }
 
-    public void shutdown() {}
+    /* =====================================================
+       === RICHTIGER REMOTE ENTRYPOINT (Message-basiert)
+       ===================================================== */
+    public void onExternalMessage(Message msg) {
+        int senderId = msg.senderId();
+        String payload = msg.payload();
 
-    // Simulation-Metadaten
-    public void onSimulationStart(int nodeCount, double loss, boolean randomFail, double failRate, double permProb, long durationMs) {
-        logRaw("SimulationStart", "nodes=%d loss=%.2f randomFail=%b failRate=%.3f/s permProb=%.2f duration=%ds"
-                .formatted(nodeCount, loss, randomFail, failRate, permProb, durationMs/1000));
-        addEvent("Simulation start: nodes=%d, loss=%.2f, randomFail=%b, failRate=%.3f/s, permProb=%.2f, duration=%ds"
-                .formatted(nodeCount, loss, randomFail, failRate, permProb, durationMs/1000), false);
-    }
+        addEvent("RX MONITOR_EVENT von N" + senderId +
+                " | type=" + msg.type() +
+                " | payload='" + payload + "'");
 
-    // Node-API
-    public void onNodeStart(int id, double initTime, double drift) {
-        NodeState ns = nodes.get(id);
-        if (ns == null) { ns = new NodeState(id); nodes.put(id, ns); }
-        ns.time = initTime; ns.drift = drift; ns.alive = true; ns.dead = false; ns.master = false;
-        logRaw("NodeStart", "id=%d t=%.3f drift=%.5f".formatted(id, initTime, drift));
-        addEvent("Node %d started (t=%.3f, drift=%.5f)".formatted(id, initTime, drift), true);
-    }
-
-    public void onNodeStop(int id, boolean permanent) {
-        NodeState ns = nodes.get(id);
-        if (ns != null) {
-            ns.alive = false;
-            ns.dead = permanent;
-            ns.master = false;
-        }
-        logRaw("NodeStop", "id=%d permanent=%b".formatted(id, permanent));
-        addEvent("Node %d stopped%s".formatted(id, permanent ? " (PERM)" : ""), true);
-    }
-
-    public void onFailStopStart(int id, long downtimeMs) {
-        NodeState ns = nodes.get(id);
-        if (ns != null) ns.alive = false;
-        logRaw("FailStopStart", "id=%d ms=%d".formatted(id, downtimeMs));
-        addEvent("Node %d FAIL-STOP (%.0f ms)".formatted(id, (double) downtimeMs), true);
-    }
-
-    public void onFailStopEnd(int id) {
-        NodeState ns = nodes.get(id);
-        if (ns != null) ns.alive = true;
-        logRaw("FailStopEnd", "id=%d".formatted(id));
-        addEvent("Node %d RETURN from fail-stop".formatted(id), true);
-    }
-
-    public void onMasterElected(int id) {
-        if (id == currentMasterId) return; // dedupe
-        currentMasterId = id;
-        nodes.values().forEach(n -> n.master = (n.id == id));
-        logRaw("MasterElected", "id=%d".formatted(id));
-        addEvent("Master elected: Node %d".formatted(id), true);
-        if (renderMasterChangeDashboard) {
-            renderSnapshot("Master change");
-        }
-    }
-
-    public void onDemotedTo(int newMasterId) {
-        if (newMasterId == currentMasterId) return; // dedupe
-        currentMasterId = newMasterId;
-        nodes.values().forEach(n -> n.master = (n.id == newMasterId));
-        logRaw("Demotion", "newMaster=%d".formatted(newMasterId));
-        addEvent("Demotion by HB: new master %d".formatted(newMasterId), true);
-    }
-
-    public void onElectionStart(int id) {
-        logRaw("ElectionStart", "node=%d".formatted(id));
-        addEvent("Node %d starts election".formatted(id), true);
-    }
-
-    public void onCoordinatorAnnounce(int id) {
-        logRaw("CoordinatorAnnounce", "by=%d".formatted(id));
-        addEvent("Node %d announces COORDINATOR".formatted(id), true);
-    }
-
-    public void onSyncStart(int masterId) {
-        logRaw("SyncStart", "master=%d".formatted(masterId));
-        addEvent("Master %d starts Berkeley round".formatted(masterId), true);
-    }
-
-    public void onSyncEnd(int masterId, double E, double gamma, Collection<Integer> inliers) {
-        syncRound++;
-        String s = "Sync: E=%+.6f, γ=%.6f, inliers=%s (M=%d)".formatted(E, gamma, inliers, masterId);
-        lastSyncSummary = s;
-        logRaw("SyncEnd", "round=%d master=%d E=%.6f gamma=%.6f inliers=%s"
-                .formatted(syncRound, masterId, E, gamma, inliers.toString()));
-        addEvent(s, true);
-        renderSnapshot("After Sync #" + syncRound);
-    }
-
-    public void updateNodeTime(int id, double time) {
-        NodeState ns = nodes.get(id);
-        if (ns != null) ns.time = time;
-    }
-
-    public void updateNodeDrift(int id, double drift) {
-        NodeState ns = nodes.get(id);
-        if (ns != null) ns.drift = drift;
-    }
-
-    // Message-API
-    public void onMessageAttempt(Message msg) {
-        // MONITOR_EVENT gibi şeyleri burada saymak istemiyorsanız, isterseniz filter ekleriz.
-        sentTotal.get(msg.type()).incrementAndGet();
-        sentDelta.get(msg.type()).incrementAndGet();
-        logRaw("MsgSend", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
-    }
-
-    public void onMessageLost(Message msg) {
-        lostTotal.get(msg.type()).incrementAndGet();
-        lostDelta.get(msg.type()).incrementAndGet();
-        logRaw("MsgLost", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
-        if (verbosity != Verbosity.SUMMARY || showLossInDashboard) {
-            addEvent("MSG LOST: %s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()), true);
-        }
-    }
-
-    public void onMessageDelivered(Message msg) {
-        logRaw("MsgDelivered", "%s %d->%d".formatted(msg.type(), msg.senderId(), msg.targetId()));
-    }
-
-    public List<String> getRawEvents(int lastN) {
-        synchronized (rawEvents) {
-            int from = Math.max(0, rawEvents.size() - lastN);
-            return new ArrayList<>(rawEvents.subList(from, rawEvents.size()));
-        }
-    }
-
-    // Rendering
-    private void renderSnapshot(String title) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("\n===================== DASHBOARD @ ").append(LocalTime.now()).append(" =====================\n");
-        sb.append("Master: ").append(currentMasterId == -1 ? "—" : currentMasterId)
-                .append(" | Last Sync: ").append(lastSyncSummary)
-                .append(" | ").append(title).append("\n");
-
-        double masterTime = (currentMasterId != -1 && nodes.containsKey(currentMasterId)) ? nodes.get(currentMasterId).time : 0.0;
-        List<Double> diffs = new ArrayList<>();
-        for (NodeState n : nodes.values()) if (!n.dead && n.alive) diffs.add(Math.abs(n.time - masterTime));
-        double maxSkew = diffs.stream().mapToDouble(d -> d).max().orElse(0.0);
-        double mean = diffs.stream().mapToDouble(d -> d).average().orElse(0.0);
-        double var = diffs.stream().mapToDouble(d -> (d - mean)*(d - mean)).average().orElse(0.0);
-        double stddev = Math.sqrt(var);
-        sb.append("Skew: max=").append(String.format("%.3f", maxSkew))
-                .append("s, σ=").append(String.format("%.3f", stddev)).append("s\n");
-
-        sb.append("Nodes:\n");
-        sb.append(" ID | State  | M |     Time(s) |  Drift  \n");
-        sb.append("----+--------+---+-------------+---------\n");
-        nodes.values().stream().sorted(Comparator.comparingInt(n -> n.id)).forEach(n -> {
-            String state = n.dead ? "DEAD" : (n.alive ? "UP" : "DOWN");
-            sb.append(String.format(" %2d | %-6s | %s | %11.3f | %7.5f\n",
-                    n.id, state, (n.master ? "*" : " "), n.time, n.drift));
-        });
-
-        sb.append("\nMessages (Δ/total):\n");
-        for (Message.Type t : Message.Type.values()) {
-            long sD = sentDelta.get(t).getAndSet(0);
-            long lD = lostDelta.get(t).getAndSet(0);
-            long sT = sentTotal.get(t).get();
-            long lT = lostTotal.get(t).get();
-            sb.append(String.format(" %-18s sent %5d/%-5d  lost %4d/%-4d\n", t, sD, sT, lD, lT));
-        }
-
-        sb.append("\nRecent events:\n");
-        synchronized (recentEvents) {
-            for (String e : recentEvents) sb.append(" - ").append(e).append("\n");
-        }
-        sb.append("=====================================================================\n");
-        System.out.print(sb);
-    }
-
-    private void addEvent(String e, boolean eligibleForDashboard) {
-        logRaw("Event", e);
-
-        if (!eligibleForDashboard) return;
-
-        if (verbosity == Verbosity.SUMMARY && e.startsWith("MSG LOST")) {
+        if (payload == null || payload.isBlank()) {
+            addEvent("WARN: Leeres Payload von N" + senderId);
+            renderDashboard();
             return;
         }
 
-        synchronized (recentEvents) {
-            if (recentEvents.isEmpty() || lastEvent == null || !lastEvent.equals(e)) {
-                if (lastEventCount > 1) {
-                    recentEvents.removeLast();
-                    recentEvents.addLast(lastEvent + " × " + lastEventCount);
-                }
-                recentEvents.addLast(e);
-                lastEvent = e;
-                lastEventCount = 1;
-                while (recentEvents.size() > recentCapacity) recentEvents.removeFirst();
-            } else {
-                lastEventCount++;
-                recentEvents.removeLast();
-                recentEvents.addLast(lastEvent + " × " + lastEventCount);
-            }
-        }
+        handlePayload(senderId, payload);
+        renderDashboard();
     }
 
-    private void logRaw(String type, String payload) {
-        String line = LocalTime.now() + " [" + type + "] " + payload;
-        synchronized (rawEvents) {
-            rawEvents.add(line);
-            if (rawEvents.size() > rawMax) {
-                int cut = Math.max(1, rawMax / 10);
-                for (int i = 0; i < cut; i++) rawEvents.remove(0);
-            }
-        }
-    }
-
-    public int getCurrentMasterId() { return currentMasterId; }
-
-    /* =========================================================
-       === NEW: Distributed monitor entrypoint (used by MonitorMain)
-       === payload format: "TYPE|k=v|k=v|..."
-       ========================================================= */
+    /* =====================================================
+       === LEGACY: falls irgendwo noch String benutzt wird
+       ===================================================== */
     public void onExternalEvent(int senderId, String payload) {
-        // örnek: "NODE_START|time=123.0|drift=0.97"
-        //        "MASTER_ELECTED|id=5"
-        //        "SYNC_END|master=5|E=-1.2|gamma=0.02|inliers=1,2,5"
+        addEvent("WARN: onExternalEvent(String) benutzt! payload='" + payload + "'");
+        handlePayload(senderId, payload);
+        renderDashboard();
+    }
+
+    public int getCurrentMasterId() {
+        return currentMaster;
+    }
+
+    /* =====================================================
+       === ZENTRALE PAYLOAD-VERARBEITUNG
+       ===================================================== */
+    private void handlePayload(int senderId, String payload) {
         try {
             String[] parts = payload.split("\\|");
             String type = parts[0].trim();
@@ -310,50 +96,218 @@ public class SimulationMonitor {
             }
 
             switch (type) {
-                case "NODE_START" -> {
-                    double t = parseDouble(kv.get("time"), 0.0);
-                    double d = parseDouble(kv.get("drift"), 1.0);
-                    onNodeStart(senderId, t, d);
+
+                case "MASTER_ELECTED" -> {
+                    int id = Integer.parseInt(kv.getOrDefault("id", String.valueOf(senderId)));
+                    setMaster(id, "MASTER_ELECTED");
                 }
-                case "NODE_STOP" -> onNodeStop(senderId, false);
-                case "MASTER_ELECTED" -> onMasterElected((int) parseDouble(kv.get("id"), senderId));
-                case "ELECTION_START" -> onElectionStart(senderId);
-                case "COORDINATOR_ANNOUNCE" -> onCoordinatorAnnounce(senderId);
-                case "SYNC_START" -> onSyncStart(senderId);
+
+                case "SYNC_START" -> {
+                    int m = Integer.parseInt(kv.getOrDefault("master", String.valueOf(senderId)));
+                    setMaster(m, "SYNC_START");   // master kimse onu sabitle
+                    onSyncStart(m);
+                }
+
                 case "SYNC_END" -> {
-                    int master = (int) parseDouble(kv.get("master"), senderId);
+                    int m = Integer.parseInt(kv.getOrDefault("master", String.valueOf(senderId)));
                     double E = parseDouble(kv.get("E"), 0.0);
-                    double gamma = parseDouble(kv.get("gamma"), 0.0);
-                    Set<Integer> inliers = parseInliers(kv.get("inliers"));
-                    onSyncEnd(master, E, gamma, inliers);
+                    double g = parseDouble(kv.getOrDefault("gamma", "0.0"), 0.0);
+                    Set<Integer> in = parseIdSet(kv.get("inliers"));
+                    // SYNC_END de master bilgisi içeriyor, sync yapan masterı güncellemek mantıklı
+                    setMaster(m, "SYNC_END");
+                    onSyncEnd(m, E, g, in);
                 }
-                case "TIME" -> {
-                    double t = parseDouble(kv.get("t"), 0.0);
-                    updateNodeTime(senderId, t);
+
+                case "SYNC_SKIP" -> {
+                    String reason = kv.getOrDefault("reason", "unknown");
+                    String inliers = kv.getOrDefault("inliers", "");
+                    String offsets = kv.getOrDefault("offsets", "");
+                    double g = parseDouble(kv.getOrDefault("gamma", "0.0"), 0.0);
+                    onSyncSkip(senderId, reason, inliers, offsets, g);
                 }
-                default -> {
-                    // bilinmeyen event: en azından dashboard’a düşsün
-                    addEvent("External: N" + senderId + " -> " + payload, true);
+
+                // master DEĞİŞTİRMEZ – sadece log
+                case "MASTER_SLEW" ->
+                        addEvent("MASTER_SLEW von N" + senderId + " E=" + fmt(parseDouble(kv.get("E"), 0.0)));
+
+                case "SLAVE_SLEW" ->
+                        onSlaveSlew(senderId, parseDouble(kv.get("off"), 0.0));
+
+                case "TIME" ->
+                        updateNodeTime(senderId, parseDouble(kv.get("t"), 0.0));
+
+                case "DRIFT" ->
+                        updateNodeDrift(senderId, parseDouble(kv.get("d"), 1.0));
+
+                // Bunlar master değiştirir mi? Tek başına hayır.
+                // Ama DEMOTED payload'ında newMaster varsa, monitor masterı güncelleyebilir.
+                case "DEMOTED" -> {
+                    addEvent("Node " + senderId + " wurde degradiert");
+                    String nm = kv.get("newMaster");
+                    if (nm != null) {
+                        try { setMaster(Integer.parseInt(nm.trim()), "DEMOTED"); } catch (Exception ignored) {}
+                    }
                 }
+
+                case "COORDINATOR_ADOPT" -> {
+                    // Bu eventi Node tarafı zaten atıyordu. Masterı direkt buradan düzeltmek iyi olur.
+                    String m = kv.get("master");
+                    if (m != null) {
+                        try { setMaster(Integer.parseInt(m.trim()), "COORDINATOR_ADOPT"); }
+                        catch (Exception e) { addEvent("PARSE ERROR COORDINATOR_ADOPT: " + payload); }
+                    } else {
+                        addEvent("COORDINATOR_ADOPT ohne master=? payload=" + payload);
+                    }
+                }
+
+                case "ELECTION_OK_RX" ->
+                        addEvent("Election OK von Node " + senderId);
+
+                case "EPOCH_MISMATCH_SUSPECT" ->
+                        addEvent("Epoch-Mismatch vermutet bei Node " + senderId);
+
+                case "MASTER_OFFSET_IGNORED" ->
+                        addEvent("Master-Offset ignoriert (Node " + senderId + ")");
+
+                default ->
+                        addEvent("UNBEKANNTES EVENT von N" + senderId + ": " + payload);
             }
+
         } catch (Exception e) {
-            addEvent("External parse error from N" + senderId + ": " + payload, true);
+            addEvent("PARSE ERROR von N" + senderId + ": " + payload);
+            addEvent("ERROR: " + e.getMessage());
         }
     }
 
-    private static double parseDouble(String s, double def) {
-        if (s == null) return def;
-        try { return Double.parseDouble(s); } catch (Exception e) { return def; }
+    /* ======================
+       === MonitorSink impl
+       ====================== */
+
+    @Override
+    public void onMasterElected(int id) {
+        setMaster(id, "onMasterElected()");
+        addEvent("MASTER_ELECTED N" + id);
     }
 
-    private static Set<Integer> parseInliers(String s) {
+    @Override
+    public void onSyncStart(int masterId) {
+        addEvent("SYNC_START M=" + masterId);
+    }
+
+    @Override
+    public void onSyncEnd(int masterId, double E, double gamma, Collection<Integer> inliers) {
+        syncRound++;
+        lastSync = "Sync#" + syncRound + " E=" + fmt(E) + " gamma=" + fmt(gamma);
+        addEvent("SYNC_END M=" + masterId + " E=" + fmt(E) + " gamma=" + fmt(gamma) + " inliers=" + inliers);
+    }
+
+    @Override
+    public void onSyncSkip(int masterId, String reason, String inliers, String offsets, double gamma) {
+        addEvent("SYNC_SKIP M=" + masterId + " reason=" + reason + " gamma=" + fmt(gamma));
+        if (verbosity == Verbosity.DETAIL && offsets != null && !offsets.isBlank()) {
+            addEvent("  offsets=" + offsets);
+        }
+    }
+
+    @Override
+    public void onMasterSlew(int masterId, double E) {
+        addEvent("MASTER_SLEW M=" + masterId + " E=" + fmt(E));
+    }
+
+    @Override
+    public void onSlaveSlew(int nodeId, double off) {
+        addEvent("SLAVE_SLEW N" + nodeId + " off=" + fmt(off));
+    }
+
+    @Override
+    public void updateNodeTime(int id, double time) {
+        nodes.computeIfAbsent(id, NodeState::new).time = time;
+    }
+
+    @Override
+    public void updateNodeDrift(int id, double drift) {
+        nodes.computeIfAbsent(id, NodeState::new).drift = drift;
+    }
+
+    @Override
+    public void onMessageAttempt(Message msg) {
+        sentTotal.get(msg.type()).incrementAndGet();
+        sentDelta.get(msg.type()).incrementAndGet();
+    }
+
+    @Override
+    public void onMessageLost(Message msg) {
+        lostTotal.get(msg.type()).incrementAndGet();
+        lostDelta.get(msg.type()).incrementAndGet();
+    }
+
+    @Override public void onMessageDelivered(Message msg) {}
+
+    /**
+     * Tek doğru master-set noktası.
+     * currentMaster + node.master flag'lerini burada güncelliyoruz.
+     */
+    private void setMaster(int id, String via) {
+        if (id <= 0) return; // 0/-1 gibi saçmalıkları yok say
+        if (currentMaster == id) return;
+
+        currentMaster = id;
+
+        // node state'i garantiye al
+        nodes.computeIfAbsent(id, NodeState::new);
+
+        // master flag'lerini güncelle
+        nodes.values().forEach(n -> n.master = (n.id == id));
+
+        addEvent("MASTER SET -> " + id + " via " + via);
+    }
+
+    /* ======================
+       === Dashboard
+       ====================== */
+
+    private void addEvent(String e) {
+        if (recentEvents.size() >= recentCapacity) recentEvents.removeFirst();
+        recentEvents.addLast(e);
+    }
+
+    private void renderDashboard() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("\n===================== DASHBOARD @ ").append(LocalTime.now()).append(" =====================\n");
+        sb.append("Master: ").append(currentMaster <= 0 ? "—" : currentMaster).append("\n");
+        sb.append("Last Sync: ").append(lastSync).append("\n\n");
+
+        sb.append("Nodes:\n");
+        sb.append(" ID | State | M |        Time |   Drift\n");
+        sb.append("----+-------+---+-------------+---------\n");
+
+        nodes.values().stream()
+                .sorted(Comparator.comparingInt(n -> n.id))
+                .forEach(n -> sb.append(String.format(
+                        " %2d | %-5s | %s | %11.3f | %7.5f\n",
+                        n.id, n.alive ? "UP" : "DOWN", n.master ? "*" : " ", n.time, n.drift
+                )));
+
+        sb.append("\nRecent events:\n");
+        for (String e : recentEvents) sb.append(" - ").append(e).append("\n");
+        sb.append("=====================================================================\n");
+        System.out.print(sb);
+    }
+
+    private static double parseDouble(String s, double def) {
+        try { return s == null ? def : Double.parseDouble(s); }
+        catch (Exception e) { return def; }
+    }
+
+    private static Set<Integer> parseIdSet(String s) {
+        if (s == null || s.isBlank()) return Set.of();
+        String cleaned = s.replace("[", "").replace("]", "");
         Set<Integer> set = new HashSet<>();
-        if (s == null || s.isBlank()) return set;
-        // "1,2,5" formatı
-        String[] parts = s.split(",");
-        for (String p : parts) {
+        for (String p : cleaned.split(",")) {
             try { set.add(Integer.parseInt(p.trim())); } catch (Exception ignored) {}
         }
         return set;
     }
+
+    private static String fmt(double v) { return String.format("%.6f", v); }
 }

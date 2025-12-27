@@ -1,34 +1,49 @@
 package de.thws;
 
+import java.io.ByteArrayInputStream;
+import java.io.ObjectInputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.util.List;
 
 public class MonitorMain {
 
-    private static final int MONITOR_PORT = 6000;
-
     public static void main(String[] args) throws Exception {
+
+        int port = 6000;
+        DatagramSocket socket = new DatagramSocket(port);
+        System.out.println("Monitor listening on UDP port " + port);
+
+        byte[] buf = new byte[8192];
 
         SimulationMonitor monitor = new SimulationMonitor(
                 List.of(1, 2, 3, 4, 5),
                 SimulationMonitor.Verbosity.SUMMARY,
-                false,
-                false,
                 15
         );
 
-        UDPTransport transport = new UDPTransport(MONITOR_PORT, 1.0, null);
-        System.out.println("MonitorMain listening on UDP port " + MONITOR_PORT);
-
         while (true) {
-            Message msg = transport.receive();
-            if (msg == null) continue;
+            DatagramPacket packet = new DatagramPacket(buf, buf.length);
+            socket.receive(packet);
 
-            System.out.println("MONITOR RX: " + msg);
+            try {
+                ByteArrayInputStream bais =
+                        new ByteArrayInputStream(packet.getData(), 0, packet.getLength());
+                ObjectInputStream ois = new ObjectInputStream(bais);
 
-            if (msg.type() == Message.Type.MONITOR_EVENT) {
-                monitor.onExternalEvent(msg.senderId(), msg.payload());
+                Object obj = ois.readObject();
+
+                if (!(obj instanceof Message msg)) {
+                    System.err.println("WARN: Unbekanntes Objekt empfangen: " + obj);
+                    continue;
+                }
+
+                monitor.onExternalMessage(msg);
+
+            } catch (Exception e) {
+                System.err.println("MONITOR ERROR: " + e.getMessage());
+                e.printStackTrace();
             }
         }
-
     }
 }

@@ -1,27 +1,25 @@
+// UDPTransport.java  (Senin Node↔Node transport. Sadece monitor tipi düzeltildi.)
 package de.thws;
 
 import java.io.*;
 import java.net.*;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Random;
 
 public class UDPTransport {
 
-    // Flag: steuert, ob verlorene Nachrichten in der Konsole gedruckt werden
     private static volatile boolean PRINT_LOSS = false;
+    public static void setPrintLoss(boolean enabled) { PRINT_LOSS = enabled; }
 
-    public static void setPrintLoss(boolean enabled) {
-        PRINT_LOSS = enabled;
-    }
-
-    private DatagramSocket socket;
+    private final DatagramSocket socket;
     private final double successProbability;
     private final Random random = new Random();
     private volatile boolean closed = false;
 
-    private final SimulationMonitor monitor;
+    private final MonitorSink monitor;
 
-    public UDPTransport(int port, double successProbability, SimulationMonitor monitor) throws SocketException {
+    public UDPTransport(int port, double successProbability, MonitorSink monitor) throws SocketException {
         this.successProbability = successProbability;
         this.socket = new DatagramSocket(port);
         this.socket.setSoTimeout(200);
@@ -30,11 +28,22 @@ public class UDPTransport {
 
     public void close() {
         closed = true;
-        if (socket != null && !socket.isClosed()) socket.close();
+        if (!socket.isClosed()) socket.close();
     }
 
     public void send(Message msg, NodeInfo target) {
         if (closed) return;
+
+        if (monitor != null) monitor.onMessageAttempt(msg);
+
+        if (random.nextDouble() > successProbability) {
+            if (monitor != null) monitor.onMessageLost(msg);
+            if (PRINT_LOSS) {
+                System.out.printf("Message LOST: %s %d->%d%n", msg.type(), msg.senderId(), target.id());
+            }
+            return;
+        }
+
         try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
              ObjectOutputStream oos = new ObjectOutputStream(bos)) {
 
@@ -42,21 +51,11 @@ public class UDPTransport {
             oos.flush();
             byte[] data = bos.toByteArray();
 
-            if (monitor != null) monitor.onMessageAttempt(msg);
+            InetAddress address = InetAddress.getByName(target.host());
+            DatagramPacket packet = new DatagramPacket(data, data.length, address, target.port());
+            socket.send(packet);
 
-            if (random.nextDouble() <= successProbability) {
-                InetAddress address = InetAddress.getByName(target.host());
-                DatagramPacket packet = new DatagramPacket(data, data.length, address, target.port());
-                socket.send(packet);
-                if (monitor != null) monitor.onMessageDelivered(msg);
-            } else {
-                // Monitor-Zählung und optionaler Console-Print
-                if (monitor != null) monitor.onMessageLost(msg);
-                if (PRINT_LOSS) {
-                    System.out.printf("Message LOST: %s %d->%d%n",
-                            msg.type(), msg.senderId(), target.id());
-                }
-            }
+            if (monitor != null) monitor.onMessageDelivered(msg);
 
         } catch (IOException e) {
             if (!closed) e.printStackTrace();
@@ -69,6 +68,7 @@ public class UDPTransport {
 
     public Message receive() {
         if (closed) return null;
+
         try {
             byte[] buf = new byte[4096];
             DatagramPacket packet = new DatagramPacket(buf, buf.length);
@@ -87,5 +87,23 @@ public class UDPTransport {
             if (!closed) e.printStackTrace();
             return null;
         }
+    }
+    public void sendRawMonitorEvent(int senderId, String payload, NodeInfo target) {
+        if (closed) return;
+
+        try {
+            byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+            DatagramPacket packet = new DatagramPacket(
+                    data, data.length,
+                    InetAddress.getByName(target.host()),
+                    target.port()
+            );
+            socket.send(packet);
+        } catch (Exception e) {
+            if (!closed) e.printStackTrace();
+        }
+    }
+    public DatagramSocket getSocket() {
+        return socket;
     }
 }
